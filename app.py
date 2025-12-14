@@ -335,7 +335,7 @@ def generate_ppt_from_graph(user_request: str):
     - 'extractos'
   """
   # 1) Embedding de la petición
-  emb = embed(user_request)
+  emb = embed_text(user_request)
   if emb is None or not emb:
       return {"error": "No se pudo calcular el embedding de la petición."}
   
@@ -376,7 +376,7 @@ async def handle_generate_ppt(question: str):
     # Mostrar que estamos en modo generación
     await cl.Message("He detectado que quieres **generar un Pliego de Prescripciones Técnicas**. Buscando pliegos de referencia…").send()
     
-    emb = embed(question)
+    emb = await cl.make_async(embed_text)(question)
     if not emb:
         await cl.Message("No he podido calcular el embedding de tu petición. Inténtalo de nuevo reformulando el objeto.").send()
         return
