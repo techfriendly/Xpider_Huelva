@@ -64,22 +64,6 @@ async def set_evidence_sidebar(
     }
 
     el = cl.CustomElement(name="EvidencePanel", props=props)
-    """
-    Abre/actualiza el sidebar derecho con un CustomElement EvidencePanel.
-    Chainlit permite controlar el sidebar desde Python con ElementSidebar.
-    El CustomElement se implementa en public/elements/EvidencePanel.jsx.
-    """
-    if props_extra is None:
-        props_extra = {}
-
-    props = {
-        "title": title,
-        "markdown": markdown,
-        "context": context_text,
-        **props_extra,
-    }
-
-    el = cl.CustomElement(name="EvidencePanel", props=props)
 
     try:
         await cl.ElementSidebar.set_title(title)
