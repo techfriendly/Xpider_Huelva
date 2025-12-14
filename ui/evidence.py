@@ -42,13 +42,28 @@ def build_evidence_markdown(contratos, capitulos, extractos) -> str:
 
     return "\n".join(lines)
 
-
 async def set_evidence_sidebar(
     title: str,
     markdown: str,
     props_extra: Optional[Dict[str, Any]] = None,
     context_text: Optional[str] = None,
 ):
+    """
+    Abre/actualiza el sidebar derecho con un CustomElement EvidencePanel.
+    Chainlit permite controlar el sidebar desde Python con ElementSidebar.
+    El CustomElement se implementa en public/elements/EvidencePanel.jsx.
+    """
+    if props_extra is None:
+        props_extra = {}
+
+    props = {
+        "title": title,
+        "markdown": markdown,
+        "context": context_text,
+        **props_extra,
+    }
+
+    el = cl.CustomElement(name="EvidencePanel", props=props)
     """
     Abre/actualiza el sidebar derecho con un CustomElement EvidencePanel.
     Chainlit permite controlar el sidebar desde Python con ElementSidebar.
