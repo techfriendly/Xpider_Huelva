@@ -878,6 +878,8 @@ async def handle_generate_ppt(question: str):
         } for ex in extra_extractos[:12]]
     )
 
+    # Garantiza que el panel se refresca al generar varios pliegos consecutivos
+    await clear_evidence_sidebar()
     await set_evidence_sidebar(
         title="Evidencias RAG usadas (PPT)",
         markdown=evidence_md,
