@@ -137,7 +137,7 @@ function renderMarkdown(md) {
   return out
 }
 
-export default function EvidencePanel() {
+export default function EvidencePanel(props) {
   const title = props?.title || "Evidencias"
   const markdown = props?.markdown || ""
   const mode = props?.mode || "RAG"
