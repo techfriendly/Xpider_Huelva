@@ -144,6 +144,7 @@ export default function EvidencePanel(props) {
   const tokens = props?.tokens || {}
   const filters = props?.filters || {}
   const counts = props?.counts || {}
+  const context = props?.context || ""
 
   const sent = tokens?.sent_approx
   const budget = tokens?.budget
@@ -179,8 +180,20 @@ export default function EvidencePanel(props) {
 
       <CardContent className="pt-3">
         <ScrollArea className="h-[70vh] pr-3">
-          <div className="space-y-2">
-            {renderMarkdown(markdown)}
+          <div className="space-y-4">
+            <div className="space-y-2">
+              {renderMarkdown(markdown)}
+            </div>
+
+            {context && (
+              <div className="space-y-2">
+                <Separator />
+                <h3 className="text-sm font-semibold">Contexto enviado al LLM</h3>
+                <pre className="text-xs whitespace-pre-wrap font-mono leading-5 bg-muted p-2 rounded border border-border">
+                  {context}
+                </pre>
+              </div>
+            )}
           </div>
         </ScrollArea>
       </CardContent>
