@@ -58,15 +58,23 @@ async def set_evidence_sidebar(title: str, markdown: str, props_extra: Optional[
         **props_extra,
     }
 
+    el = cl.CustomElement(name="EvidencePanel", props=props)
+
     try:
-        el = cl.CustomElement(name="EvidencePanel", props=props)
         await cl.ElementSidebar.set_title(title)
         await cl.ElementSidebar.set_elements([el])
-    except Exception:
-        # Fallback: si tu versión de Chainlit no soporta ElementSidebar,
-        # al menos adjuntamos el elemento al mensaje siguiente como "inline".
-        # (No lo mandamos al chat para no ensuciar; pero evitamos crash.)
-        pass
+    except Exception as exc:
+        # Fallback: si ElementSidebar no está disponible (versiones antiguas de Chainlit),
+        # adjuntamos el panel como un elemento inline para que el usuario siga viendo
+        # las evidencias en el chat.
+        print(f"[WARN] No se pudo abrir el sidebar de evidencias: {exc}")
+        try:
+            await cl.Message(
+                content="(Aviso) Muestro las evidencias en el chat porque no puedo abrir el panel lateral.",
+                elements=[el],
+            ).send()
+        except Exception as exc_inline:
+            print(f"[ERROR] Tampoco pude adjuntar evidencias en el mensaje: {exc_inline}")
 
 
 async def clear_evidence_sidebar():
