@@ -179,11 +179,9 @@ export default function EvidencePanel(props) {
       <Separator />
 
       <CardContent className="pt-3">
-        <ScrollArea className="h-[70vh] pr-3"></ScrollArea>
-        <div className="space-y-4">
-            <div className="space-y-2">
-              {renderMarkdown(markdown)}
-            </div>
+        <ScrollArea className="h-[70vh] pr-3">
+          <div className="space-y-4">
+            <div className="space-y-2">{renderMarkdown(markdown)}</div>
 
             {context && (
               <div className="space-y-2">
