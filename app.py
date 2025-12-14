@@ -287,6 +287,7 @@ async def on_message(message: cl.Message):
                     "extractos": len(extractos),
                 },
             },
+            context_text=context,
         )
 
         messages_llm: List[Dict[str, str]] = [{"role": "system", "content": system_msg}]
