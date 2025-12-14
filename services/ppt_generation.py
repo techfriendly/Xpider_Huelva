@@ -6,8 +6,8 @@ import config
 from clients import llm_client
 from services.embeddings import embed_text
 from services.neo4j_queries import neo4j_query, search_capitulos, search_extractos
-from utils.json_utils import safe_json_loads
-from utils.text_utils import clip
+from chat_utils.json_utils import safe_json_loads
+from chat_utils.text_utils import clip
 
 try:
     from docx import Document

@@ -2,7 +2,7 @@
 from typing import List
 
 import config
-from utils.text_utils import clip, enforce_budget
+from chat_utils.text_utils import clip, enforce_budget
 
 
 def build_context(question: str, contratos, capitulos, extractos) -> str:

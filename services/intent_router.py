@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 import config
 from clients import llm_client
-from utils.json_utils import safe_json_loads
+from chat_utils.json_utils import safe_json_loads
 
 
 def _normalize_extracto_types(tipos: Any) -> Optional[List[str]]:

@@ -6,7 +6,7 @@ from typing import Any, Dict
 import config
 from clients import llm_client
 from services.neo4j_queries import neo4j_query
-from utils.json_utils import safe_json_loads
+from chat_utils.json_utils import safe_json_loads
 
 
 WRITE_KEYWORDS = re.compile(

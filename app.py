@@ -25,7 +25,7 @@ from services.ppt_generation import (
     slug_filename,
 )
 from ui.evidence import build_evidence_markdown, clear_evidence_sidebar, set_evidence_sidebar
-from utils.text_utils import context_token_report, estimate_tokens, trim_history_to_fit
+from chat_utils.text_utils import context_token_report, estimate_tokens, trim_history_to_fit
 
 
 async def handle_generate_ppt(question: str):

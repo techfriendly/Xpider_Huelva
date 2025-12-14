@@ -3,7 +3,7 @@ from typing import List
 
 import config
 from clients import llm_client
-from utils.json_utils import safe_json_loads
+from chat_utils.json_utils import safe_json_loads
 
 
 def summarize_for_memory(text: str, max_tokens: int = config.MEMORY_SUMMARY_TOKENS) -> str:
