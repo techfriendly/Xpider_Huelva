@@ -25,6 +25,78 @@ Este repositorio contiene un asistente conversacional construido con [Chainlit](
    ```
    El flag `-w` activa recarga en caliente durante el desarrollo.
 
+### Despliegue paso a paso en un servidor Ubuntu 24.04
+
+1. **Instala dependencias del sistema** (Python 3.10+, `pip`, `git`, `systemd` viene de serie):
+   ```bash
+   sudo apt update
+   sudo apt install -y python3 python3-venv python3-pip git
+   ```
+2. **Clona el repositorio** (ajusta la URL a tu origen de GitHub):
+   ```bash
+   git clone https://github.com/tu-org/tu-repo.git
+   cd tu-repo
+   ```
+3. **Crea y activa un entorno virtual** para aislar dependencias:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+4. **Instala las dependencias del proyecto**:
+   ```bash
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+5. **Configura las variables de entorno** en un archivo `.env` o exportándolas antes de lanzar el servicio (ver sección siguiente).
+6. **Prueba localmente** que Chainlit arranca:
+   ```bash
+   chainlit run app.py -w
+   ```
+   Accede desde el navegador a `http://<IP-del-servidor>:8000`.
+
+### Ejecutar Chainlit como servicio persistente (systemd)
+
+Para que Chainlit siga activo después de cerrar la terminal, crea un servicio `systemd` que use el entorno virtual y cargue las variables de entorno.
+
+1. **Crea un archivo de servicio** (ajusta rutas a tu usuario y ubicación del repo):
+   ```bash
+   sudo tee /etc/systemd/system/chainlit.service >/dev/null <<'EOF'
+   [Unit]
+   Description=Chainlit RAG Huelva
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=ubuntu
+   WorkingDirectory=/home/ubuntu/tu-repo
+   Environment="PYTHONUNBUFFERED=1"
+   EnvironmentFile=/home/ubuntu/tu-repo/.env
+   ExecStart=/home/ubuntu/tu-repo/.venv/bin/chainlit run /home/ubuntu/tu-repo/app.py --host 0.0.0.0 --port 8000
+   Restart=on-failure
+
+   [Install]
+   WantedBy=multi-user.target
+   EOF
+   ```
+   - `EnvironmentFile` debe apuntar a un archivo `.env` con las variables sensibles.
+   - Usa `User` y `WorkingDirectory` acordes al usuario que alojará el servicio.
+2. **Recarga la configuración de systemd y habilita el servicio**:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now chainlit.service
+   ```
+3. **Verifica el estado y los logs**:
+   ```bash
+   systemctl status chainlit.service
+   journalctl -u chainlit.service -f
+   ```
+4. **Actualizar el servicio tras cambiar el código o el `.env`**:
+   ```bash
+   sudo systemctl restart chainlit.service
+   ```
+
+Con esta configuración, Chainlit se iniciará automáticamente al arrancar el servidor y seguirá ejecutándose aunque cierres la sesión SSH.
+
 ## Variables de entorno clave
 
 - **Neo4j**: `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DB` (por defecto `huelva`).
