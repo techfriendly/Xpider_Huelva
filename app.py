@@ -201,7 +201,19 @@ async def on_chat_start():
     cl.user_session.set("ppt_pending", False)
     cl.user_session.set("ppt_request_base", "")
     cl.user_session.set("ppt_questions", [])
-    cl.user_session.set("router_state", {"last_focus": None, "last_empresa_query": None, "last_empresa_nif": None})
+    cl.user_session.set(
+        "router_state",
+        {
+            "last_focus": None,
+            "last_empresa_query": None,
+            "last_empresa_nif": None,
+            "last_contratos": [],
+            "last_capitulos": [],
+            "last_extractos": [],
+            "last_doc_tipo": None,
+            "last_extracto_tipos": None,
+        },
+    )
     await clear_evidence_sidebar()
 
     await cl.Message(
@@ -243,7 +255,19 @@ async def on_message(message: cl.Message):
         return
 
     history: List[Dict[str, str]] = cl.user_session.get("history", [])
-    router_state: Dict[str, Any] = cl.user_session.get("router_state", {"last_focus": None, "last_empresa_query": None, "last_empresa_nif": None})
+    router_state: Dict[str, Any] = cl.user_session.get(
+        "router_state",
+        {
+            "last_focus": None,
+            "last_empresa_query": None,
+            "last_empresa_nif": None,
+            "last_contratos": [],
+            "last_capitulos": [],
+            "last_extractos": [],
+            "last_doc_tipo": None,
+            "last_extracto_tipos": None,
+        },
+    )
 
     thinking_msg = await cl.Message(content="Detectando intención...").send()
 
@@ -481,6 +505,18 @@ async def on_message(message: cl.Message):
                 reply.actions = actions
                 await reply.update()
 
+                router_state.update(
+                    {
+                        "last_focus": "EMPRESA",
+                        "last_contratos": contratos,
+                        "last_capitulos": capitulos,
+                        "last_extractos": extractos,
+                        "last_doc_tipo": doc_tipo,
+                        "last_extracto_tipos": tipos,
+                    }
+                )
+                cl.user_session.set("router_state", router_state)
+
                 thinking_msg.content = f"Respuesta generada (RAG Empresa). Tokens aprox: enviados={rep['total']}, generados={estimate_tokens(answer)}"
                 await thinking_msg.update()
                 return
@@ -489,18 +525,29 @@ async def on_message(message: cl.Message):
         thinking_msg.content = "Ejecutando RAG (vector search) con filtros..."
         await thinking_msg.update()
 
-        embedding = await cl.make_async(embed_text)(question)
-        if not embedding:
-            thinking_msg.content = "No he podido generar el embedding."
+        use_cached_context = bool(intent.get("is_followup") and router_state.get("last_contratos"))
+        if use_cached_context:
+            thinking_msg.content = "Reutilizando el contexto previo para el seguimiento..."
             await thinking_msg.update()
-            return
 
-        doc_tipo = intent.get("doc_tipo")
-        tipos = intent.get("extracto_tipos")
+            contratos = router_state.get("last_contratos", [])
+            capitulos = router_state.get("last_capitulos", [])
+            extractos = router_state.get("last_extractos", [])
+            doc_tipo = router_state.get("last_doc_tipo")
+            tipos = router_state.get("last_extracto_tipos")
+        else:
+            embedding = await cl.make_async(embed_text)(question)
+            if not embedding:
+                thinking_msg.content = "No he podido generar el embedding."
+                await thinking_msg.update()
+                return
 
-        contratos = await cl.make_async(search_contratos)(embedding, config.K_CONTRATOS)
-        capitulos = await cl.make_async(search_capitulos)(embedding, config.K_CAPITULOS, doc_tipo)
-        extractos = await cl.make_async(search_extractos)(embedding, config.K_EXTRACTOS, tipos, doc_tipo)
+            doc_tipo = intent.get("doc_tipo")
+            tipos = intent.get("extracto_tipos")
+
+            contratos = await cl.make_async(search_contratos)(embedding, config.K_CONTRATOS)
+            capitulos = await cl.make_async(search_capitulos)(embedding, config.K_CAPITULOS, doc_tipo)
+            extractos = await cl.make_async(search_extractos)(embedding, config.K_EXTRACTOS, tipos, doc_tipo)
 
         contratos = _normalize_contrato_keys(contratos)
 
@@ -591,6 +638,18 @@ async def on_message(message: cl.Message):
 
         reply.actions = actions
         await reply.update()
+
+        router_state.update(
+            {
+                "last_focus": "CONTRATO",
+                "last_contratos": contratos,
+                "last_capitulos": capitulos,
+                "last_extractos": extractos,
+                "last_doc_tipo": doc_tipo,
+                "last_extracto_tipos": tipos,
+            }
+        )
+        cl.user_session.set("router_state", router_state)
 
         thinking_msg.content = f"Respuesta generada (RAG). Tokens aprox: enviados={rep['total']}, generados={estimate_tokens(answer)}"
         await thinking_msg.update()

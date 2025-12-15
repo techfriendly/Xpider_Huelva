@@ -37,6 +37,14 @@ _RE_IMPORTE_TOTAL = re.compile(
 # Follow-up elíptico: "y Vodafone?"
 _RE_Y_SIMPLE = re.compile(r"^\s*y\s+(.+?)\s*[?¿!]*\s*$", re.IGNORECASE)
 
+# Follow-up anafórico: "sobre el texto anterior / ese contrato"
+_RE_PREV_TEXT = re.compile(
+    r"\b(sobre|respecto|acerca)\s+(del?|de la|de los|de las)?\s+"
+    r"(texto|contrato|expediente|pliego)\s+(anterior|previo|último|ultimo)\b"
+    r"|\b(sobre|de|del|de la)\s+(ese|ese mismo|dicho)\s+(contrato|expediente|texto)\b",
+    re.IGNORECASE,
+)
+
 
 def _normalize_extracto_types(tipos: Any) -> Optional[List[str]]:
     if not isinstance(tipos, list):
@@ -145,7 +153,21 @@ def detect_intent(
                 "empresa_nif": _extract_cif(q),
             }
 
-    # 5) Empresa (RAG): "buscas info sobre X"
+    # 5) Follow-up anafórico: "sobre el texto anterior / ese contrato"
+    if _RE_PREV_TEXT.search(q) and last_focus in {"CONTRATO", "EMPRESA"}:
+        return {
+            "intent": "RAG_QA",
+            "doc_tipo": last_state.get("last_doc_tipo"),
+            "extracto_tipos": last_state.get("last_extracto_tipos"),
+            "needs_aggregation": False,
+            "is_greeting": False,
+            "is_followup": True,
+            "focus": last_focus or "CONTRATO",
+            "empresa_query": last_state.get("last_empresa_query"),
+            "empresa_nif": last_state.get("last_empresa_nif"),
+        }
+
+    # 6) Empresa (RAG): "buscas info sobre X"
     m = _RE_BUSCA_INFO.search(q)
     if m:
         empresa = _clean_empresa(m.group(4))
@@ -162,7 +184,7 @@ def detect_intent(
                 "empresa_nif": _extract_cif(q),
             }
 
-    # 6) Empresa (RAG): "adjudicaciones/contratos de X"
+    # 7) Empresa (RAG): "adjudicaciones/contratos de X"
     m = _RE_ADJUDICACIONES.search(q)
     if m:
         empresa = _clean_empresa(m.group(3))
@@ -179,7 +201,7 @@ def detect_intent(
                 "empresa_nif": _extract_cif(q),
             }
 
-    # 7) Empresa (RAG): "qué contratos ha ganado X"
+    # 8) Empresa (RAG): "qué contratos ha ganado X"
     m = _RE_QUE_HA_GANADO.search(q)
     if m:
         empresa = _clean_empresa(m.group(3))
@@ -196,7 +218,7 @@ def detect_intent(
                 "empresa_nif": _extract_cif(q),
             }
 
-    # 8) Empresa (RAG) corto: "... ha ganado X"
+    # 9) Empresa (RAG) corto: "... ha ganado X"
     m = _RE_HA_GANADO_CORTO.search(q)
     if m:
         empresa = _clean_empresa(m.group(1))
@@ -213,7 +235,7 @@ def detect_intent(
                 "empresa_nif": _extract_cif(q),
             }
 
-    # 9) Fallback LLM router (tu lógica original ampliada)
+    # 10) Fallback LLM router (tu lógica original ampliada)
     prompt = f"""
 Fecha actual: {config.TODAY_STR}
 
