@@ -37,26 +37,60 @@ def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> Lis
     if not embedding:
         return []
     cypher = """
-    CALL db.index.vector.queryNodes('contrato_rag_embedding', $k, $embedding)
-    YIELD node, score
-    OPTIONAL MATCH (e:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(node)
+    // Mezclamos coincidencias en contratos, capítulos y extractos para priorizar contratos
+    // que tienen contenido relevante asociado.
+    CALL {
+      // Vector search directa sobre contratos
+      CALL db.index.vector.queryNodes('contrato_rag_embedding', $k, $embedding)
+      YIELD node, score
+      RETURN coalesce(node.contract_id, node.expediente, '') AS contract_id, score
+
+      UNION
+
+      // Contratos cuyo PPT tiene capítulos relevantes
+      CALL db.index.vector.queryNodes('capitulo_embedding', $k_capitulos, $embedding)
+      YIELD node, score
+      MATCH (c:ContratoRAG)-[:TIENE_DOC]->(:DocumentoRAG)-[:TIENE_CAPITULO]->(node)
+      RETURN coalesce(c.contract_id, c.expediente, '') AS contract_id, score
+
+      UNION
+
+      // Contratos con extractos relevantes
+      CALL db.index.vector.queryNodes('extracto_embedding', $k_extractos, $embedding)
+      YIELD node, score
+      MATCH (c:ContratoRAG)-[:TIENE_DOC]->(:DocumentoRAG)-[:TIENE_EXTRACTO]->(node)
+      RETURN coalesce(c.contract_id, c.expediente, '') AS contract_id, score
+    }
+    WITH contract_id, max(score) AS score
+    WHERE contract_id <> ''
+
+    MATCH (c:ContratoRAG)
+    WHERE c.contract_id = contract_id OR c.expediente = contract_id
+    OPTIONAL MATCH (e:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(c)
     RETURN
-      coalesce(node.expediente, '')    AS contract_id,
-      coalesce(node.expediente,'')     AS expediente,
-      coalesce(node.titulo,'')         AS titulo,
-      coalesce(node.abstract,'')       AS abstract,
-      coalesce(node.estado,'')         AS estado,
-      coalesce(node.cpv_principal,'')  AS cpv_principal,
-      coalesce(node.contract_uri,'')   AS link_contrato,   
-      e.nif                            AS adjudicataria_nif,
-      e.nombre                         AS adjudicataria_nombre,
-      node.presupuesto_sin_iva         AS presupuesto_sin_iva,
-      node.valor_estimado              AS valor_estimado,
-      coalesce(r.importe_adjudicado, r.importe, node.importe_adjudicado) AS importe_adjudicado,
+      coalesce(c.contract_id, c.expediente, '') AS contract_id,
+      coalesce(c.expediente,'')                AS expediente,
+      coalesce(c.titulo,'')                    AS titulo,
+      coalesce(c.abstract,'')                  AS abstract,
+      coalesce(c.estado,'')                    AS estado,
+      coalesce(c.cpv_principal,'')             AS cpv_principal,
+      coalesce(c.contract_uri,'')              AS link_contrato,
+      e.nif                                    AS adjudicataria_nif,
+      e.nombre                                 AS adjudicataria_nombre,
+      c.presupuesto_sin_iva                    AS presupuesto_sin_iva,
+      c.valor_estimado                         AS valor_estimado,
+      coalesce(r.importe_adjudicado, r.importe, c.importe_adjudicado) AS importe_adjudicado,
       score
     ORDER BY score DESC
+    LIMIT $k
     """
-    return neo4j_query(cypher, {"k": k, "embedding": embedding})
+    params = {
+        "k": k,
+        "k_capitulos": min(k * 2, config.K_CAPITULOS),
+        "k_extractos": min(k * 2, config.K_EXTRACTOS),
+        "embedding": embedding,
+    }
+    return neo4j_query(cypher, params)
 
 
 def search_capitulos(embedding: List[float], k: int = config.K_CAPITULOS, doc_tipo: Optional[str] = None) -> List[Dict[str, Any]]:
