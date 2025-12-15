@@ -1,0 +1,37 @@
+/* -------------------------------------------------------
+   Evidencias en el panel derecho (Element Sidebar)
+   Nota: el selector exacto puede variar por versión, por eso
+   incluimos varias alternativas.
+------------------------------------------------------- */
+
+/* 1) Targets típicos del panel/drawer */
+#element-sidebar .prose,
+#element-sidebar .prose * ,
+[data-testid="element-sidebar"] .prose,
+[data-testid="element-sidebar"] .prose * {
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+/* 2) Ajuste específico de listas para compactar */
+#element-sidebar .prose ul,
+#element-sidebar .prose ol,
+[data-testid="element-sidebar"] .prose ul,
+[data-testid="element-sidebar"] .prose ol {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+#element-sidebar .prose li,
+[data-testid="element-sidebar"] .prose li {
+  margin-top: 0.15rem;
+}
+
+/* 3) Bloques de código (Cypher/JSON) algo más pequeños */
+#element-sidebar pre,
+#element-sidebar code,
+[data-testid="element-sidebar"] pre,
+[data-testid="element-sidebar"] code {
+  font-size: 9px;
+  line-height: 1.3;
+}

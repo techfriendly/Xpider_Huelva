@@ -24,7 +24,12 @@ from services.ppt_generation import (
     ppt_to_docx_bytes,
     slug_filename,
 )
-from ui.evidence import build_evidence_markdown, clear_evidence_sidebar, set_evidence_sidebar
+from ui.evidence import (
+    build_cypher_evidence_markdown,
+    build_evidence_markdown,
+    clear_evidence_sidebar,
+    set_evidence_sidebar,
+)
 from chat_utils.text_utils import context_token_report, estimate_tokens, trim_history_to_fit
 
 
@@ -65,6 +70,7 @@ async def handle_generate_ppt(question: str):
 
     extra_caps = await cl.make_async(search_capitulos)(emb, k=min(12, config.K_CAPITULOS), doc_tipo="PPT")
     extra_extractos = await cl.make_async(search_extractos)(emb, k=min(20, config.K_EXTRACTOS), tipos=None, doc_tipo="PPT")
+
     evidence_md = build_evidence_markdown(
         contratos=[
             {
@@ -162,11 +168,11 @@ async def on_chat_start():
 
     await cl.Message(
         content=(
-            "Hola. Soy el asistente RAG/Cypher de contratos (Huelva).\n\n"
+            "Hola. Soy el asistente virtual de contratos (Huelva).\n\n"
             "Puedo:\n"
-            "- Responder preguntas (RAG) y mostrar evidencias a la derecha.\n"
-            "- Contar/sumar/rankings (Cypher).\n"
-            "- Generar un PPT (te preguntaré si falta contexto) y descargarlo en Word.\n"
+            "- Responder preguntas y mostrar evidencias a la derecha de tu pantalla.\n"
+            "- Contar/sumar/rankings... Contratos, documentos, ...\n"
+            "- Generar un pliego técnico (te preguntaré si falta contexto) y descargarlo en Word.\n"
         )
     ).send()
 
@@ -216,6 +222,32 @@ async def on_message(message: cl.Message):
             await thinking_msg.update()
 
             out = await cl.make_async(cypher_qa)(question)
+
+            # Siempre intentamos enviar evidencia al sidebar (incluso si hay error),
+            # para que puedas depurar qué Cypher se generó.
+            plan = out.get("plan") or {}
+            params = plan.get("params") if isinstance(plan, dict) else None
+            cypher = out.get("cypher") or ""
+            rows = out.get("rows") or []
+
+            evidence_md = build_cypher_evidence_markdown(
+                question=question,
+                cypher=cypher,
+                rows=rows,
+                params=params if isinstance(params, dict) else None,
+                error=out.get("error"),
+                max_rows=25,
+            )
+
+            await set_evidence_sidebar(
+                title="Evidencias Neo4j (Cypher)",
+                markdown=evidence_md,
+                props_extra={
+                    "mode": "CYPHER",
+                    "counts": {"rows": len(rows) if isinstance(rows, list) else 0},
+                },
+            )
+
             if out.get("error"):
                 await cl.Message(content=f"No he podido ejecutar Cypher QA.\nDetalle: {out.get('error')}").send()
                 return
@@ -232,6 +264,7 @@ async def on_message(message: cl.Message):
             await thinking_msg.update()
             return
 
+        # RAG
         thinking_msg.content = "Ejecutando RAG (vector search) con filtros..."
         await thinking_msg.update()
 

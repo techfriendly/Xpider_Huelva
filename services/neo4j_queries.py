@@ -21,10 +21,10 @@ def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> Lis
     YIELD node, score
     OPTIONAL MATCH (e:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(node)
     RETURN
-      node.contract_id                 AS contract_id,
+      coalesce(node.expediente,'')     AS contract_id,
       coalesce(node.expediente,'')     AS expediente,
       coalesce(node.titulo,'')         AS titulo,
-      coalesce(node.abstract,'')       AS resumen,
+      coalesce(node.abstract,'')       AS abstract,
       coalesce(node.estado,'')         AS estado,
       coalesce(node.cpv_principal,'')  AS cpv_principal,
       e.nif                            AS adjudicataria_nif,
@@ -76,11 +76,11 @@ def search_extractos(
     MATCH (c:ContratoRAG)-[td:TIENE_DOC]->(d:DocumentoRAG)-[:TIENE_EXTRACTO]->(node)
     WHERE ($doc_tipo IS NULL OR td.tipo_doc = $doc_tipo)
     RETURN
-      node.extracto_id               AS extracto_id,
+      coalesce(node.expediente,'')   AS extracto_id,
       coalesce(node.tipo,'')         AS tipo,
       coalesce(node.texto,'')        AS texto,
       coalesce(node.fuente_doc,'')   AS fuente_doc,
-      c.contract_id                  AS contract_id,
+      coalesce(c.expediente,'')      AS contract_id,
       coalesce(c.expediente,'')      AS expediente,
       coalesce(c.titulo,'')          AS contrato_titulo,
       score
