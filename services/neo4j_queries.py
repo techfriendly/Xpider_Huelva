@@ -59,6 +59,7 @@ def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> Lis
       CALL db.index.vector.queryNodes('extracto_embedding', $k_extractos, $embedding)
       YIELD node, score
       MATCH (c:ContratoRAG)-[:TIENE_DOC]->(:DocumentoRAG)-[:TIENE_EXTRACTO]->(node)
+      WHERE node.tipo = "normativa"
       RETURN coalesce(c.contract_id, c.expediente, '') AS contract_id, score
     }
     WITH contract_id, max(score) AS score

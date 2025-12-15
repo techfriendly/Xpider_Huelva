@@ -26,28 +26,27 @@ MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "12"))
 SUGGESTION_LABEL_MAX_CHARS = int(os.getenv("SUGGESTION_LABEL_MAX_CHARS", "100"))
 
 MODEL_MAX_CONTEXT_TOKENS = int(os.getenv("MODEL_MAX_CONTEXT_TOKENS", "40000"))
-RESERVE_FOR_ANSWER_TOKENS = int(os.getenv("RESERVE_FOR_ANSWER_TOKENS", "1400"))
-MEMORY_SUMMARY_TOKENS = int(os.getenv("MEMORY_SUMMARY_TOKENS", "500"))
+RESERVE_FOR_ANSWER_TOKENS = int(os.getenv("RESERVE_FOR_ANSWER_TOKENS", "6000"))
+MEMORY_SUMMARY_TOKENS = int(os.getenv("MEMORY_SUMMARY_TOKENS", "600"))
 
 RAG_CONTEXT_MAX_TOKENS = int(os.getenv("RAG_CONTEXT_MAX_TOKENS", "12000"))
 RAG_CONTEXT_MAX_CHARS = RAG_CONTEXT_MAX_TOKENS * 4
 
 KNOWN_EXTRACTO_TYPES = [
-    "normativas",
-    "ubicaciones",
-    "presupuesto_base",
+    "normativa",
+#    "presupuesto_base",
     "garantia_definitiva",
     "garantia_otros_tipos",
-    "duracion_y_prorrogas",
+#    "duracion_y_prorrogas",
     "solvencia_tecnica",
     "solvencia_economica",
-    "modificacion_contrato",
-    "causas_imprevistas",
-    "criterios_adjudicacion",
+#    "modificacion_contrato",
+#    "causas_imprevistas",
+#    "criterios_adjudicacion",
     "criterios_ambientales",
     "clausulas_sociales",
     "clausulas_igualdad_genero",
-    "medios_personales",
-    "medios_materiales",
-    "CPV",
+#    "medios_personales",
+#    "medios_materiales",
+#    "CPV",
 ]
