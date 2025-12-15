@@ -1,5 +1,6 @@
+import json
 import re
-from typing import Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import chainlit as cl
 
@@ -14,7 +15,13 @@ from services.followups import (
     summarize_for_memory,
 )
 from services.intent_router import detect_intent
-from services.neo4j_queries import search_capitulos, search_contratos, search_extractos
+from services.neo4j_queries import (
+    search_capitulos,
+    search_contratos,
+    search_contratos_by_empresa,
+    search_empresas,
+    search_extractos,
+)
 from services.ppt_generation import (
     HAS_DOCX,
     build_ppt_generation_prompt_one_by_one,
@@ -24,15 +31,167 @@ from services.ppt_generation import (
     ppt_to_docx_bytes,
     slug_filename,
 )
-from ui.evidence import (
-    build_cypher_evidence_markdown,
-    build_evidence_markdown,
-    clear_evidence_sidebar,
-    set_evidence_sidebar,
-)
+from ui.evidence import build_evidence_markdown, clear_evidence_sidebar, set_evidence_sidebar
 from chat_utils.text_utils import context_token_report, estimate_tokens, trim_history_to_fit
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
+def _json_preview(obj: Any, max_chars: int = 12000) -> str:
+    try:
+        s = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        s = str(obj)
+    if len(s) <= max_chars:
+        return s
+    return s[: max_chars - 20] + "\n\n…(truncado)…"
+
+
+def _escape_fence(text: str) -> str:
+    if not text:
+        return ""
+    return text.replace("```", "``\u200b`")
+
+
+def _normalize_contratos_for_context(contratos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Normaliza claves para compatibilidad:
+    - build_context usa c["abstract"] (pero algunas versiones devuelven "resumen").
+    """
+    out: List[Dict[str, Any]] = []
+    for c in contratos or []:
+        if not isinstance(c, dict):
+            continue
+        c2 = dict(c)
+        if "abstract" not in c2 and "resumen" in c2:
+            c2["abstract"] = c2.get("resumen")
+        out.append(c2)
+    return out
+
+
+def _empresa_lookup_from_intent(intent: Dict[str, Any], question: str) -> Optional[str]:
+    q = (intent.get("empresa_nif") or intent.get("empresa_query") or "").strip()
+    if q:
+        return q
+    # Fallback mínimo (no depende del router): intenta detectar CIF
+    m = re.search(r"\b([A-Z]\d{8})\b", (question or "").upper())
+    if m:
+        return m.group(1)
+    return None
+
+
+def _build_empresa_block_for_context(
+    empresa_lookup: str,
+    empresas: List[Dict[str, Any]],
+    contratos: List[Dict[str, Any]],
+) -> str:
+    """
+    Bloque adicional para meter en el contexto cuando el focus es EMPRESA.
+    """
+    lines: List[str] = []
+    lines.append("=== EMPRESA / ADJUDICACIONES ===")
+    lines.append(f"Búsqueda: {empresa_lookup}")
+
+    if empresas:
+        # Mostramos 1-3 candidatos
+        lines.append("")
+        lines.append("Empresas candidatas (top):")
+        for e in empresas[:3]:
+            nombre = e.get("nombre") or "N/D"
+            nif = e.get("nif") or "N/D"
+            cnt = e.get("adjudicaciones_count")
+            total = e.get("adjudicaciones_total")
+            lines.append(f"- {nombre} (NIF: {nif}) | adjudicaciones: {cnt} | total: {total}")
+    else:
+        lines.append("")
+        lines.append("No se ha podido resolver la empresa por nombre/NIF (se intenta con adjudicaciones encontradas).")
+
+    # Resumen rápido derivado de la lista de contratos (por si no hay métricas)
+    if contratos:
+        lines.append("")
+        lines.append(f"Adjudicaciones recuperadas: {len(contratos)} (lista de contratos abajo).")
+
+    return "\n".join(lines)
+
+
+def _build_empresa_evidence_markdown(
+    empresa_lookup: str,
+    empresas: List[Dict[str, Any]],
+) -> str:
+    lines: List[str] = []
+    lines.append("### Evidencias (Empresa)")
+    lines.append(f"**Búsqueda:** {empresa_lookup}")
+
+    if not empresas:
+        lines.append("")
+        lines.append("No hay coincidencias directas en (EmpresaRAG) para esta búsqueda.")
+        return "\n".join(lines)
+
+    lines.append("")
+    lines.append("**Coincidencias (top):**")
+    for e in empresas[:5]:
+        nombre = e.get("nombre") or "N/D"
+        nif = e.get("nif") or "N/D"
+        cnt = e.get("adjudicaciones_count")
+        total = e.get("adjudicaciones_total")
+        lines.append(f"- {nombre} (NIF: {nif}) | adjudicaciones: {cnt} | total: {total}")
+
+        adjud = e.get("adjudicaciones") or []
+        if adjud:
+            lines.append("  - Top adjudicaciones:")
+            for a in adjud[:5]:
+                lines.append(
+                    f"    - {a.get('expediente') or a.get('contract_id') or 'N/D'} · "
+                    f"{(a.get('titulo') or 'N/D')}"
+                )
+
+    return "\n".join(lines)
+
+
+def _build_cypher_evidence_markdown(question: str, out: Dict[str, Any]) -> str:
+    cypher = out.get("cypher") or ""
+    plan = out.get("plan") or {}
+    params = plan.get("params") if isinstance(plan, dict) else None
+    rows = out.get("rows") or []
+    err = out.get("error")
+
+    lines: List[str] = []
+    lines.append("### Evidencias (Neo4j / Cypher)")
+    lines.append("")
+    lines.append("**Pregunta**")
+    lines.append(_escape_fence(question.strip()))
+
+    if err:
+        lines.append("")
+        lines.append("**Error**")
+        lines.append(_escape_fence(str(err)))
+
+    lines.append("")
+    lines.append("**Cypher ejecutado**")
+    lines.append("```cypher")
+    lines.append(_escape_fence(cypher.strip()))
+    lines.append("```")
+
+    if isinstance(params, dict) and params:
+        lines.append("")
+        lines.append("**Parámetros**")
+        lines.append("```json")
+        lines.append(_escape_fence(_json_preview(params)))
+        lines.append("```")
+
+    lines.append("")
+    lines.append("**Resultado (preview)**")
+    lines.append("```json")
+    lines.append(_escape_fence(_json_preview(rows[:25])))
+    lines.append("```")
+
+    return "\n".join(lines)
+
+
+# -----------------------------
+# PPT flow
+# -----------------------------
 async def handle_generate_ppt(question: str):
     plan = await cl.make_async(plan_ppt_clarifications)(question)
     if plan["need_clarification"] and plan["questions"]:
@@ -77,7 +236,12 @@ async def handle_generate_ppt(question: str):
                 "expediente": ref_data.get("expediente"),
                 "titulo": ref_data.get("contrato_titulo"),
                 "adjudicataria_nombre": ref_contrato.get("adjudicataria_nombre"),
+                "adjudicataria_nif": ref_contrato.get("adjudicataria_nif"),
                 "importe_adjudicado": ref_contrato.get("importe_adjudicado"),
+                "presupuesto_sin_iva": ref_contrato.get("presupuesto_sin_iva"),
+                "cpv_principal": ref_data.get("cpv_principal"),
+                "estado": ref_data.get("estado"),
+                "abstract": ref_data.get("abstract") or "",
             }
         ],
         capitulos=[
@@ -158,6 +322,9 @@ async def handle_generate_ppt(question: str):
     await cl.Message(content=f"Resumen del PPT (memoria corta):\n\n{ppt_summary}").send()
 
 
+# -----------------------------
+# Chainlit hooks
+# -----------------------------
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("history", [])
@@ -168,11 +335,11 @@ async def on_chat_start():
 
     await cl.Message(
         content=(
-            "Hola. Soy el asistente virtual de contratos (Huelva).\n\n"
+            "Hola. Soy el asistente RAG/Cypher de contratos.\n\n"
             "Puedo:\n"
-            "- Responder preguntas y mostrar evidencias a la derecha de tu pantalla.\n"
-            "- Contar/sumar/rankings... Contratos, documentos, ...\n"
-            "- Generar un pliego técnico (te preguntaré si falta contexto) y descargarlo en Word.\n"
+            "- Responder preguntas (RAG) y mostrar evidencias a la derecha.\n"
+            "- Contar/sumar/rankings (Cypher).\n"
+            "- Generar un PPT (con referencia del grafo) y descargarlo en Word.\n"
         )
     ).send()
 
@@ -194,6 +361,7 @@ async def on_message(message: cl.Message):
         await cl.Message(content="No he recibido ninguna pregunta.").send()
         return
 
+    # Resolución de aclaraciones de PPT
     if cl.user_session.get("ppt_pending", False):
         base_req = cl.user_session.get("ppt_request_base", "")
         final_req = f"{base_req}\n\nAclaraciones del usuario:\n{question}"
@@ -209,80 +377,125 @@ async def on_message(message: cl.Message):
     try:
         intent = await cl.make_async(detect_intent)(question)
 
-        if intent["intent"] == "GENERATE_PPT":
+        # 1) PPT
+        if intent.get("intent") == "GENERATE_PPT":
             await thinking_msg.update()
             await handle_generate_ppt(question)
+
             history.append({"role": "user", "content": question})
-            history.append({"role": "assistant", "content": f"PPT generado (fecha {config.TODAY_STR}). Word entregado + resumen corto."})
+            history.append(
+                {"role": "assistant", "content": f"PPT generado (fecha {config.TODAY_STR}). Word entregado + resumen corto."}
+            )
             cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
             return
 
-        if intent["intent"] == "CYPHER_QA":
+        # 2) CYPHER
+        if intent.get("intent") == "CYPHER_QA":
             thinking_msg.content = "Generando y ejecutando consulta Cypher (solo lectura)..."
             await thinking_msg.update()
 
             out = await cl.make_async(cypher_qa)(question)
 
-            # Siempre intentamos enviar evidencia al sidebar (incluso si hay error),
-            # para que puedas depurar qué Cypher se generó.
-            plan = out.get("plan") or {}
-            params = plan.get("params") if isinstance(plan, dict) else None
-            cypher = out.get("cypher") or ""
-            rows = out.get("rows") or []
-
-            evidence_md = build_cypher_evidence_markdown(
-                question=question,
-                cypher=cypher,
-                rows=rows,
-                params=params if isinstance(params, dict) else None,
-                error=out.get("error"),
-                max_rows=25,
-            )
-
+            # Evidencias Cypher siempre (incluido error) para depurar
+            evidence_md = _build_cypher_evidence_markdown(question, out)
             await set_evidence_sidebar(
                 title="Evidencias Neo4j (Cypher)",
                 markdown=evidence_md,
-                props_extra={
-                    "mode": "CYPHER",
-                    "counts": {"rows": len(rows) if isinstance(rows, list) else 0},
-                },
+                props_extra={"mode": "CYPHER"},
             )
 
             if out.get("error"):
                 await cl.Message(content=f"No he podido ejecutar Cypher QA.\nDetalle: {out.get('error')}").send()
                 return
 
-            answer = out["answer"]
+            answer = out.get("answer") or "No hay respuesta."
             await cl.Message(content=answer).send()
 
             history.append({"role": "user", "content": question})
-            answer_mem = await cl.make_async(summarize_for_memory)(answer, config.MEMORY_SUMMARY_TOKENS) if len(answer) > 2000 else answer
+            answer_mem = (
+                await cl.make_async(summarize_for_memory)(answer, config.MEMORY_SUMMARY_TOKENS)
+                if len(answer) > 2000
+                else answer
+            )
             history.append({"role": "assistant", "content": answer_mem})
             cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
 
-            thinking_msg.content = f"Respuesta generada (Cypher). Tokens aprox: enviados={estimate_tokens(question)}, generados={estimate_tokens(answer)}"
+            thinking_msg.content = (
+                f"Respuesta generada (Cypher). Tokens aprox: enviados={estimate_tokens(question)}, generados={estimate_tokens(answer)}"
+            )
             await thinking_msg.update()
             return
 
-        # RAG
-        thinking_msg.content = "Ejecutando RAG (vector search) con filtros..."
-        await thinking_msg.update()
-
-        embedding = await cl.make_async(embed_text)(question)
-        if not embedding:
-            thinking_msg.content = "No he podido generar el embedding."
-            await thinking_msg.update()
-            return
-
+        # 3) RAG
+        focus = (intent.get("focus") or "CONTRATO").upper()
         doc_tipo = intent.get("doc_tipo")
         tipos = intent.get("extracto_tipos")
 
-        contratos = await cl.make_async(search_contratos)(embedding, config.K_CONTRATOS)
-        capitulos = await cl.make_async(search_capitulos)(embedding, config.K_CAPITULOS, doc_tipo)
-        extractos = await cl.make_async(search_extractos)(embedding, config.K_EXTRACTOS, tipos, doc_tipo)
+        thinking_msg.content = f"Ejecutando RAG (focus={focus})..."
+        await thinking_msg.update()
 
+        embedding = await cl.make_async(embed_text)(question)
+
+        contratos: List[Dict[str, Any]] = []
+        empresas: List[Dict[str, Any]] = []
+
+        # 3.A) Si es EMPRESA: buscamos adjudicaciones por nombre/NIF
+        empresa_lookup = None
+        if focus == "EMPRESA":
+            empresa_lookup = _empresa_lookup_from_intent(intent, question)
+            if empresa_lookup:
+                empresas = await cl.make_async(search_empresas)(empresa_lookup, k_empresas=5, max_adjudicaciones=12)
+                contratos = await cl.make_async(search_contratos_by_empresa)(
+                    empresa_lookup, k_empresas=3, k_contratos=max(25, config.K_CONTRATOS)
+                )
+            else:
+                # Sin lookup claro, seguimos como contrato (fallback)
+                focus = "CONTRATO"
+
+        # 3.B) Fallback contrato por embedding
+        if not contratos:
+            if not embedding:
+                thinking_msg.content = "No he podido generar el embedding (y no hay adjudicaciones por empresa)."
+                await thinking_msg.update()
+                return
+            contratos = await cl.make_async(search_contratos)(embedding, config.K_CONTRATOS)
+
+        contratos = _normalize_contratos_for_context(contratos)
+
+        # 3.C) Capítulos/extractos por embedding (y filtrado si focus=EMPRESA)
+        capitulos: List[Dict[str, Any]] = []
+        extractos: List[Dict[str, Any]] = []
+
+        if embedding:
+            # Si focus=EMPRESA, traemos más y luego filtramos por expedientes adjudicados
+            k_caps = config.K_CAPITULOS if focus != "EMPRESA" else max(config.K_CAPITULOS * 6, 30)
+            k_ext = config.K_EXTRACTOS if focus != "EMPRESA" else max(config.K_EXTRACTOS * 6, 50)
+
+            capitulos = await cl.make_async(search_capitulos)(embedding, k_caps, doc_tipo)
+            extractos = await cl.make_async(search_extractos)(embedding, k_ext, tipos, doc_tipo)
+
+            if focus == "EMPRESA" and contratos:
+                allowed = {c.get("expediente") for c in contratos if c.get("expediente")}
+                capitulos = [c for c in capitulos if c.get("expediente") in allowed][: config.K_CAPITULOS]
+                extractos = [e for e in extractos if e.get("expediente") in allowed][: config.K_EXTRACTOS]
+            else:
+                capitulos = capitulos[: config.K_CAPITULOS]
+                extractos = extractos[: config.K_EXTRACTOS]
+
+        # 3.D) Evidencias + contexto
         evidence_md = build_evidence_markdown(contratos, capitulos, extractos)
-        context = build_context(question, contratos, capitulos, extractos)
+
+        if focus == "EMPRESA" and empresa_lookup:
+            empresa_evd = _build_empresa_evidence_markdown(empresa_lookup, empresas)
+            evidence_md = empresa_evd + "\n\n" + evidence_md
+
+        context_core = build_context(question, contratos, capitulos, extractos)
+
+        if focus == "EMPRESA" and empresa_lookup:
+            empresa_block = _build_empresa_block_for_context(empresa_lookup, empresas, contratos)
+            context = empresa_block + "\n\n" + context_core
+        else:
+            context = context_core
 
         system_msg = (
             "Eres un asistente experto en contratación pública. "
@@ -303,26 +516,27 @@ async def on_message(message: cl.Message):
         thinking_msg.content = (
             f"Redactando respuesta… Tokens aprox enviados={rep['total']} "
             f"(sys={rep['system']}, hist={rep['history']}, ctx={rep['user']}). "
-            f"Filtros: doc_tipo={doc_tipo}, extracto_tipos={tipos}"
+            f"Filtros: focus={focus}, doc_tipo={doc_tipo}, extracto_tipos={tipos}"
         )
         await thinking_msg.update()
+
+        props_extra: Dict[str, Any] = {
+            "mode": "RAG",
+            "filters": {"focus": focus, "doc_tipo": doc_tipo, "extracto_tipos": tipos},
+            "tokens": {"sent_approx": rep["total"], "budget": config.MODEL_MAX_CONTEXT_TOKENS},
+            "counts": {"contratos": len(contratos), "capitulos": len(capitulos), "extractos": len(extractos)},
+        }
+        if focus == "EMPRESA" and empresa_lookup:
+            props_extra["filters"]["empresa"] = empresa_lookup
 
         await set_evidence_sidebar(
             title="Evidencias RAG usadas",
             markdown=evidence_md,
-            props_extra={
-                "mode": "RAG",
-                "filters": {"doc_tipo": doc_tipo, "extracto_tipos": tipos},
-                "tokens": {"sent_approx": rep["total"], "budget": config.MODEL_MAX_CONTEXT_TOKENS},
-                "counts": {
-                    "contratos": len(contratos),
-                    "capitulos": len(capitulos),
-                    "extractos": len(extractos),
-                },
-            },
+            props_extra=props_extra,
             context_text=context,
         )
 
+        # 3.E) LLM respuesta
         messages_llm: List[Dict[str, str]] = [{"role": "system", "content": system_msg}]
         messages_llm.extend(history_trimmed)
         messages_llm.append({"role": "user", "content": context})
@@ -348,8 +562,13 @@ async def on_message(message: cl.Message):
         await reply.update()
         answer = "".join(full_answer).strip()
 
+        # 3.F) Memoria + followups
         history.append({"role": "user", "content": question})
-        answer_mem = await cl.make_async(summarize_for_memory)(answer, config.MEMORY_SUMMARY_TOKENS) if len(answer) > 2000 else answer
+        answer_mem = (
+            await cl.make_async(summarize_for_memory)(answer, config.MEMORY_SUMMARY_TOKENS)
+            if len(answer) > 2000
+            else answer
+        )
         history.append({"role": "assistant", "content": answer_mem})
         cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
 
@@ -373,8 +592,9 @@ async def on_message(message: cl.Message):
         reply.actions = actions
         await reply.update()
 
-        gen_tokens = estimate_tokens(answer)
-        thinking_msg.content = f"Respuesta generada (RAG). Tokens aprox: enviados={rep['total']}, generados={gen_tokens}"
+        thinking_msg.content = (
+            f"Respuesta generada (RAG). Tokens aprox: enviados={rep['total']}, generados={estimate_tokens(answer)}"
+        )
         await thinking_msg.update()
 
     except Exception as e:

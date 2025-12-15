@@ -58,6 +58,7 @@ Esquema (puede estar truncado):
 \"\"\"{schema_hint}\"\"\"
 
 REGLAS IMPORTANTES:
+- Si te hace una pregunta con un número de contrato o de expediente usa la propiedad expediente de ContratoRAG para encontrar.
 - Si usas propiedades de la relación de adjudicación (r.importe_adjudicado o r.importe),
   DEBES declarar la relación con variable r, por ejemplo:
   (emp:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(c:ContratoRAG)
