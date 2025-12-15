@@ -19,10 +19,10 @@ EMB_MODEL = os.getenv("EMB_MODEL", "embedding")
 EMB_DIM = int(os.getenv("EMB_DIM", "1024"))
 
 K_CONTRATOS = int(os.getenv("K_CONTRATOS", "5"))
-K_CAPITULOS = int(os.getenv("K_CAPITULOS", "10"))
-K_EXTRACTOS = int(os.getenv("K_EXTRACTOS", "25"))
+K_CAPITULOS = int(os.getenv("K_CAPITULOS", "15"))
+K_EXTRACTOS = int(os.getenv("K_EXTRACTOS", "50"))
 
-MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "6"))
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "12"))
 SUGGESTION_LABEL_MAX_CHARS = int(os.getenv("SUGGESTION_LABEL_MAX_CHARS", "100"))
 
 MODEL_MAX_CONTEXT_TOKENS = int(os.getenv("MODEL_MAX_CONTEXT_TOKENS", "40000"))

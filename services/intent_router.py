@@ -1,9 +1,10 @@
-"""Router de intención LLM para decidir flujo (RAG, Cypher o PPT).
+"""Router de intención (heurísticas + LLM) para decidir flujo (RAG, Cypher o PPT).
 
-Extensión:
-- Detecta si la pregunta está centrada en "EMPRESA" o "CONTRATO".
-- Extrae un posible NIF/CIF (empresa_nif) y una cadena de búsqueda (empresa_query).
-- Mantiene los campos originales para no romper la integración actual.
+Extiende el router original con:
+- is_greeting: saludos / smalltalk
+- is_followup: elipsis tipo "y Vodafone?"
+- focus: "CONTRATO" | "EMPRESA"
+- empresa_query: preferimos nombre/razón social (no CIF), aunque CIF puede venir.
 """
 import re
 from typing import Any, Dict, List, Optional
@@ -13,8 +14,28 @@ from clients import llm_client
 from chat_utils.json_utils import safe_json_loads
 
 
-# CIF típico (empresa): letra + 8 dígitos. Ej: B80519267
 _CIF_RE = re.compile(r"\b([A-Z]\d{8})\b", re.IGNORECASE)
+
+_GREET_RE = re.compile(
+    r"^\s*(hola|gracias|adios|buenas|buenos\s+d[ií]as|buenas\s+tardes|buenas\s+noches|hey|hello|hi|qué\s+tal|que\s+tal)\s*[!.?,]*\s*$",
+    re.IGNORECASE,
+)
+
+# Patrones empresa (RAG)
+_RE_BUSCA_INFO = re.compile(r"\b(busca|buscas|buscar)\s+(info|informaci[oó]n)\s+(sobre|de)\s+(.+)$", re.IGNORECASE)
+_RE_ADJUDICACIONES = re.compile(r"\b(adjudicaciones|contratos)\s+(de|del)\s+(.+)$", re.IGNORECASE)
+_RE_QUE_HA_GANADO = re.compile(r"\b(qu[eé])\s+(contratos?)\s+ha\s+ganado\s+(.+)$", re.IGNORECASE)
+_RE_HA_GANADO_CORTO = re.compile(r"\bha\s+ganado\s+(.+)$", re.IGNORECASE)
+
+# Patrones empresa (CYPHER agregación)
+_RE_CUANTOS_CONTRATOS = re.compile(r"\bcu[aá]ntos?\s+contratos?\s+ha\s+ganado\s+(.+)$", re.IGNORECASE)
+_RE_IMPORTE_TOTAL = re.compile(
+    r"\b(importe\s+total|total\s+adjudicado|cu[aá]nto\s+(dinero|importe))\b.*\b(ha\s+ganado|adjudicado|a)\s+(.+)$",
+    re.IGNORECASE,
+)
+
+# Follow-up elíptico: "y Vodafone?"
+_RE_Y_SIMPLE = re.compile(r"^\s*y\s+(.+?)\s*[?¿!]*\s*$", re.IGNORECASE)
 
 
 def _normalize_extracto_types(tipos: Any) -> Optional[List[str]]:
@@ -24,50 +45,179 @@ def _normalize_extracto_types(tipos: Any) -> Optional[List[str]]:
     return tipos_filtrados or None
 
 
-def _norm_str(val: Any, max_len: int = 180) -> Optional[str]:
-    if not isinstance(val, str):
+def _clean_empresa(s: str) -> Optional[str]:
+    if not isinstance(s, str):
         return None
-    s = val.strip()
-    if not s:
+    t = s.strip()
+    t = re.sub(r"[\n\r\t]+", " ", t)
+    t = re.sub(r"\s{2,}", " ", t)
+    t = t.strip(" ?¿!.,;:")
+    t = t.strip()
+    if not t:
         return None
-    if len(s) > max_len:
-        s = s[:max_len].strip()
-    return s or None
-
-
-def _normalize_focus(val: Any) -> str:
-    s = (str(val or "")).strip().upper()
-    if s in ("EMPRESA", "COMPANY", "ADJUDICATARIA", "PROVEEDOR", "PROVEEDORA"):
-        return "EMPRESA"
-    if s in ("CONTRATO", "CONTRACT"):
-        return "CONTRATO"
-    return "CONTRATO"
-
-
-def _normalize_cif(val: Any) -> Optional[str]:
-    s = _norm_str(val, max_len=32)
-    if not s:
+    # Evita capturar cosas que no son empresa en follow-ups
+    low = t.lower()
+    if low in {"eso", "esa", "ese", "ella", "ello", "esto", "esta", "este", "aquí", "ahí", "aqui", "ahi"}:
         return None
-    s = s.upper()
-    m = _CIF_RE.search(s)
-    if m:
-        return m.group(1).upper()
-    return None
+    if re.fullmatch(r"\d{4}", t):  # "2024"
+        return None
+    if low.startswith("en "):  # "en 2024"
+        return None
+    return t
 
 
-def _extract_cif_from_text(text: str) -> Optional[str]:
+def _extract_cif(text: str) -> Optional[str]:
     if not text:
         return None
     m = _CIF_RE.search(text.upper())
     return m.group(1).upper() if m else None
 
 
-def detect_intent(question: str) -> Dict[str, Any]:
+def detect_intent(
+    question: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    last_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    q = (question or "").strip()
+    last_state = last_state or {}
+    last_focus = (last_state.get("last_focus") or "").upper()
+
+    # 1) Saludo
+    if _GREET_RE.match(q):
+        return {
+            "intent": "RAG_QA",
+            "doc_tipo": None,
+            "extracto_tipos": None,
+            "needs_aggregation": False,
+            "is_greeting": True,
+            "is_followup": False,
+            "focus": "CONTRATO",
+            "empresa_query": None,
+            "empresa_nif": None,
+        }
+
+    # 2) Agregación por empresa: "cuántos contratos ha ganado X"
+    m = _RE_CUANTOS_CONTRATOS.search(q)
+    if m:
+        empresa = _clean_empresa(m.group(1))
+        return {
+            "intent": "CYPHER_QA",
+            "doc_tipo": None,
+            "extracto_tipos": None,
+            "needs_aggregation": True,
+            "is_greeting": False,
+            "is_followup": False,
+            "focus": "EMPRESA" if empresa else "CONTRATO",
+            "empresa_query": empresa,
+            "empresa_nif": _extract_cif(q),
+        }
+
+    # 3) Agregación por empresa: "importe total adjudicado a X"
+    m = _RE_IMPORTE_TOTAL.search(q)
+    if m:
+        empresa = _clean_empresa(m.group(4))
+        return {
+            "intent": "CYPHER_QA",
+            "doc_tipo": None,
+            "extracto_tipos": None,
+            "needs_aggregation": True,
+            "is_greeting": False,
+            "is_followup": False,
+            "focus": "EMPRESA" if empresa else "CONTRATO",
+            "empresa_query": empresa,
+            "empresa_nif": _extract_cif(q),
+        }
+
+    # 4) Follow-up corto: "y Vodafone?"
+    m = _RE_Y_SIMPLE.match(q)
+    if m and last_focus == "EMPRESA":
+        empresa = _clean_empresa(m.group(1))
+        if empresa:
+            return {
+                "intent": "RAG_QA",
+                "doc_tipo": None,
+                "extracto_tipos": None,
+                "needs_aggregation": False,
+                "is_greeting": False,
+                "is_followup": True,
+                "focus": "EMPRESA",
+                "empresa_query": empresa,
+                "empresa_nif": _extract_cif(q),
+            }
+
+    # 5) Empresa (RAG): "buscas info sobre X"
+    m = _RE_BUSCA_INFO.search(q)
+    if m:
+        empresa = _clean_empresa(m.group(4))
+        if empresa:
+            return {
+                "intent": "RAG_QA",
+                "doc_tipo": None,
+                "extracto_tipos": None,
+                "needs_aggregation": False,
+                "is_greeting": False,
+                "is_followup": False,
+                "focus": "EMPRESA",
+                "empresa_query": empresa,
+                "empresa_nif": _extract_cif(q),
+            }
+
+    # 6) Empresa (RAG): "adjudicaciones/contratos de X"
+    m = _RE_ADJUDICACIONES.search(q)
+    if m:
+        empresa = _clean_empresa(m.group(3))
+        if empresa:
+            return {
+                "intent": "RAG_QA",
+                "doc_tipo": None,
+                "extracto_tipos": None,
+                "needs_aggregation": False,
+                "is_greeting": False,
+                "is_followup": False,
+                "focus": "EMPRESA",
+                "empresa_query": empresa,
+                "empresa_nif": _extract_cif(q),
+            }
+
+    # 7) Empresa (RAG): "qué contratos ha ganado X"
+    m = _RE_QUE_HA_GANADO.search(q)
+    if m:
+        empresa = _clean_empresa(m.group(3))
+        if empresa:
+            return {
+                "intent": "RAG_QA",
+                "doc_tipo": None,
+                "extracto_tipos": None,
+                "needs_aggregation": False,
+                "is_greeting": False,
+                "is_followup": False,
+                "focus": "EMPRESA",
+                "empresa_query": empresa,
+                "empresa_nif": _extract_cif(q),
+            }
+
+    # 8) Empresa (RAG) corto: "... ha ganado X"
+    m = _RE_HA_GANADO_CORTO.search(q)
+    if m:
+        empresa = _clean_empresa(m.group(1))
+        if empresa:
+            return {
+                "intent": "RAG_QA",
+                "doc_tipo": None,
+                "extracto_tipos": None,
+                "needs_aggregation": False,
+                "is_greeting": False,
+                "is_followup": False,
+                "focus": "EMPRESA",
+                "empresa_query": empresa,
+                "empresa_nif": _extract_cif(q),
+            }
+
+    # 9) Fallback LLM router (tu lógica original ampliada)
     prompt = f"""
 Fecha actual: {config.TODAY_STR}
 
-Eres un enrutador de intención para un asistente de contratación pública con Neo4j GraphRAG.
-Devuelve SOLO JSON válido con este esquema:
+Devuelve SOLO JSON válido:
 
 {{
   "intent": "RAG_QA" | "CYPHER_QA" | "GENERATE_PPT",
@@ -76,38 +226,31 @@ Devuelve SOLO JSON válido con este esquema:
   "needs_aggregation": true | false,
 
   "focus": "CONTRATO" | "EMPRESA",
-  "empresa_query": null | "texto de búsqueda (nombre de empresa, razón social, etc.)",
-  "empresa_nif": null | "CIF/NIF de empresa (ej: B80519267)"
+  "empresa_query": null | "nombre/razón social (preferible al CIF)",
+  "empresa_nif": null | "CIF/NIF si aparece"
 }}
 
 Reglas:
-- Si pide contar/sumar/ranking/top/veces/estadísticas => intent="CYPHER_QA" y needs_aggregation=true.
-- Si pide redactar/generar/elaborar un PPT => intent="GENERATE_PPT".
-- En otro caso => intent="RAG_QA".
-- Si menciona normativa/solvencia/garantías/criterios/ubicaciones/presupuesto/duración => extracto_tipos relevante.
-- Si menciona explícitamente PPT o PCAP => doc_tipo.
-- Si la pregunta es sobre una empresa/adjudicataria (p.ej. "SANITRADE", "B80519267", "adjudicaciones de X", "empresa X") => focus="EMPRESA"
-  y rellena empresa_query (y empresa_nif si aparece).
+- Si pide contar/sumar/ranking/top => CYPHER_QA.
+- Si pide PPT o pliego de prescripciones técnicas / pliego téncico => GENERATE_PPT.
+- En otro caso => RAG_QA.
+- Si habla de adjudicataria/empresa/ganados/adjudicaciones => focus="EMPRESA" y rellena empresa_query.
+- CIF/NIF solo si aparece (no depender solo de CIF).
+- doc_tipo y extracto_tipos como antes.
 
 Tipos extracto conocidos:
 {config.KNOWN_EXTRACTO_TYPES}
 
 Pregunta:
-\"\"\"{question}\"\"\"
+\"\"\"{q}\"\"\"
 """
     resp = llm_client.chat.completions.create(
         model=config.LLM_MODEL,
-        messages=[
-            {"role": "system", "content": "Devuelve SOLO JSON válido."},
-            {"role": "user", "content": prompt},
-        ],
+        messages=[{"role": "system", "content": "Devuelve SOLO JSON válido."}, {"role": "user", "content": prompt}],
         temperature=0.0,
-        max_tokens=320,
+        max_tokens=260,
     )
-
     data = safe_json_loads(resp.choices[0].message.content or "") or {}
-    if not isinstance(data, dict):
-        data = {}
 
     intent = data.get("intent", "RAG_QA")
     if intent not in ("RAG_QA", "CYPHER_QA", "GENERATE_PPT"):
@@ -120,21 +263,21 @@ Pregunta:
     tipos = _normalize_extracto_types(data.get("extracto_tipos"))
     needs_aggregation = bool(data.get("needs_aggregation", intent == "CYPHER_QA"))
 
-    focus = _normalize_focus(data.get("focus"))
+    focus = (data.get("focus") or "CONTRATO").strip().upper()
+    if focus not in ("CONTRATO", "EMPRESA"):
+        focus = "CONTRATO"
 
-    empresa_query = _norm_str(data.get("empresa_query"))
-    empresa_nif = _normalize_cif(data.get("empresa_nif")) or _extract_cif_from_text(question)
-
-    # Si el router marca focus=EMPRESA pero no devuelve query, usamos el NIF si existe
-    if focus == "EMPRESA" and not empresa_query and empresa_nif:
-        empresa_query = empresa_nif
+    empresa_query = _clean_empresa(data.get("empresa_query") or "")
+    empresa_nif = _extract_cif(data.get("empresa_nif") or "") or _extract_cif(q)
 
     return {
         "intent": intent,
         "doc_tipo": doc_tipo,
         "extracto_tipos": tipos,
         "needs_aggregation": needs_aggregation,
-        "focus": focus,  # NUEVO
-        "empresa_query": empresa_query,  # NUEVO
-        "empresa_nif": empresa_nif,  # NUEVO
+        "is_greeting": False,
+        "is_followup": False,
+        "focus": focus,
+        "empresa_query": empresa_query,
+        "empresa_nif": empresa_nif,
     }

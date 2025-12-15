@@ -1,8 +1,12 @@
-"""Consultas y búsquedas sobre Neo4j (vector y texto)."""
+"""Consultas y búsquedas sobre Neo4j (vector + empresa/adjudicaciones)."""
+import re
 from typing import Any, Dict, List, Optional
 
 import config
 from clients import driver
+
+
+_CIF_RE = re.compile(r"\b([A-Z]\d{8})\b", re.IGNORECASE)
 
 
 def neo4j_query(cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -13,11 +17,23 @@ def neo4j_query(cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Di
         return [r.data() for r in res]
 
 
+def _clean_q(q: str) -> str:
+    q = (q or "").strip()
+    q = q.strip(" ?¿!.,;:")
+    q = re.sub(r"\s{2,}", " ", q)
+    return q
+
+
+def _looks_like_cif(q: str) -> bool:
+    if not q:
+        return False
+    return bool(_CIF_RE.search(q.strip().upper()))
+
+
 # -----------------------------
-# Vector search (actual)
+# Vector search
 # -----------------------------
 def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> List[Dict[str, Any]]:
-    """Busca contratos relevantes por embedding (vector index)."""
     if not embedding:
         return []
     cypher = """
@@ -26,7 +42,7 @@ def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> Lis
     OPTIONAL MATCH (e:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(node)
     RETURN
       coalesce(node.contract_id, node.expediente, '') AS contract_id,
-      coalesce(node.expediente, node.contract_id, '') AS expediente,
+      coalesce(node.expediente,'')     AS expediente,
       coalesce(node.titulo,'')         AS titulo,
       coalesce(node.abstract,'')       AS abstract,
       coalesce(node.estado,'')         AS estado,
@@ -42,10 +58,7 @@ def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> Lis
     return neo4j_query(cypher, {"k": k, "embedding": embedding})
 
 
-def search_capitulos(
-    embedding: List[float], k: int = config.K_CAPITULOS, doc_tipo: Optional[str] = None
-) -> List[Dict[str, Any]]:
-    """Busca capítulos relevantes por embedding."""
+def search_capitulos(embedding: List[float], k: int = config.K_CAPITULOS, doc_tipo: Optional[str] = None) -> List[Dict[str, Any]]:
     if not embedding:
         return []
     cypher = """
@@ -59,7 +72,7 @@ def search_capitulos(
       coalesce(node.texto,'')       AS texto,
       coalesce(node.fuente_doc,'')  AS fuente_doc,
       coalesce(c.contract_id, c.expediente, '') AS contract_id,
-      coalesce(c.expediente, c.contract_id, '') AS expediente,
+      coalesce(c.expediente,'')     AS expediente,
       coalesce(c.titulo,'')         AS contrato_titulo,
       score
     ORDER BY score DESC
@@ -73,7 +86,6 @@ def search_extractos(
     tipos: Optional[List[str]] = None,
     doc_tipo: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Busca extractos relevantes por embedding."""
     if not embedding:
         return []
     cypher = """
@@ -84,12 +96,12 @@ def search_extractos(
     MATCH (c:ContratoRAG)-[td:TIENE_DOC]->(d:DocumentoRAG)-[:TIENE_EXTRACTO]->(node)
     WHERE ($doc_tipo IS NULL OR td.tipo_doc = $doc_tipo)
     RETURN
-      coalesce(node.extracto_id, node.expediente, '') AS extracto_id,
+      node.extracto_id               AS extracto_id,
       coalesce(node.tipo,'')         AS tipo,
       coalesce(node.texto,'')        AS texto,
       coalesce(node.fuente_doc,'')   AS fuente_doc,
       coalesce(c.contract_id, c.expediente, '') AS contract_id,
-      coalesce(c.expediente, c.contract_id, '') AS expediente,
+      coalesce(c.expediente,'')      AS expediente,
       coalesce(c.titulo,'')          AS contrato_titulo,
       score
     ORDER BY score DESC
@@ -98,39 +110,31 @@ def search_extractos(
 
 
 # -----------------------------
-# NUEVO: Búsqueda de empresas + adjudicaciones
+# Empresa (usa tu TEXT INDEX en e.nombre)
 # -----------------------------
 def search_empresas(query: str, k_empresas: int = 5, max_adjudicaciones: int = 12) -> List[Dict[str, Any]]:
-    """Busca empresas por nombre/NIF y trae métricas + top adjudicaciones.
-
-    Nota sobre rendimiento:
-    - Si tienes TEXT INDEX sobre (e:EmpresaRAG {nombre}), consultas con CONTAINS/STARTS WITH pueden beneficiarse.
-    """
-    q = (query or "").strip()
+    """Resuelve empresas por nombre (preferible) y, si aplica, por CIF/NIF."""
+    q = _clean_q(query)
     if not q:
         return []
 
     q_upper = q.upper()
     q_lower = q.lower()
+    has_cif = _looks_like_cif(q_upper)
 
     cypher = """
     MATCH (e:EmpresaRAG)
     WHERE
-      e.nif = $q_upper
-      OR e.nif = $q
-      OR e.nombre CONTAINS $q
-      OR e.nombre CONTAINS $q_upper
-      OR e.nombre CONTAINS $q_lower
-      OR e.nombre = $q
-      OR e.nombre = $q_upper
-      OR e.nombre = $q_lower
-      OR e.nombre STARTS WITH $q
-      OR e.nombre STARTS WITH $q_upper
-      OR e.nombre STARTS WITH $q_lower
+      (
+        e.nombre CONTAINS $q OR e.nombre CONTAINS $q_upper OR e.nombre CONTAINS $q_lower
+        OR e.nombre STARTS WITH $q OR e.nombre STARTS WITH $q_upper OR e.nombre STARTS WITH $q_lower
+        OR e.nombre = $q OR e.nombre = $q_upper OR e.nombre = $q_lower
+      )
+      OR ($has_cif = true AND (e.nif = $q_upper OR e.nif = $q))
 
     WITH e,
       CASE
-        WHEN e.nif = $q_upper THEN 0
+        WHEN $has_cif = true AND (e.nif = $q_upper OR e.nif = $q) THEN 0
         WHEN e.nombre = $q OR e.nombre = $q_upper OR e.nombre = $q_lower THEN 1
         WHEN e.nombre STARTS WITH $q OR e.nombre STARTS WITH $q_upper OR e.nombre STARTS WITH $q_lower THEN 2
         ELSE 3
@@ -154,7 +158,6 @@ def search_empresas(query: str, k_empresas: int = 5, max_adjudicaciones: int = 1
           expediente: coalesce(c.expediente, c.contract_id, ''),
           titulo: coalesce(c.titulo,''),
           estado: coalesce(c.estado,''),
-          abstract: coalesce(c.abstract,''),
           cpv_principal: coalesce(c.cpv_principal,''),
           presupuesto_sin_iva: c.presupuesto_sin_iva,
           valor_estimado: c.valor_estimado,
@@ -170,7 +173,6 @@ def search_empresas(query: str, k_empresas: int = 5, max_adjudicaciones: int = 1
       [a IN adjud_raw WHERE a IS NOT NULL][0..$max_adj] AS adjudicaciones
 
     RETURN
-      coalesce(e.id, id(e)) AS empresa_id,
       elementId(e)          AS empresa_element_id,
       coalesce(e.nif,'')    AS nif,
       coalesce(e.nombre,'') AS nombre,
@@ -180,13 +182,13 @@ def search_empresas(query: str, k_empresas: int = 5, max_adjudicaciones: int = 1
       adjudicaciones
     ORDER BY match_rank ASC, adjudicaciones_count DESC, adjudicaciones_total DESC
     """
-
     return neo4j_query(
         cypher,
         {
             "q": q,
             "q_upper": q_upper,
             "q_lower": q_lower,
+            "has_cif": has_cif,
             "k_empresas": k_empresas,
             "max_adj": max_adjudicaciones,
         },
@@ -194,34 +196,28 @@ def search_empresas(query: str, k_empresas: int = 5, max_adjudicaciones: int = 1
 
 
 def search_contratos_by_empresa(query: str, k_empresas: int = 3, k_contratos: int = 25) -> List[Dict[str, Any]]:
-    """Devuelve contratos adjudicados a una empresa (por NIF o por nombre),
-    en el MISMO formato que `search_contratos` para que puedas reutilizar `build_context`.
-    """
-    q = (query or "").strip()
+    """Lista contratos adjudicados a una empresa (formato compatible con build_context)."""
+    q = _clean_q(query)
     if not q:
         return []
 
     q_upper = q.upper()
     q_lower = q.lower()
+    has_cif = _looks_like_cif(q_upper)
 
     cypher = """
     MATCH (e:EmpresaRAG)
     WHERE
-      e.nif = $q_upper
-      OR e.nif = $q
-      OR e.nombre CONTAINS $q
-      OR e.nombre CONTAINS $q_upper
-      OR e.nombre CONTAINS $q_lower
-      OR e.nombre = $q
-      OR e.nombre = $q_upper
-      OR e.nombre = $q_lower
-      OR e.nombre STARTS WITH $q
-      OR e.nombre STARTS WITH $q_upper
-      OR e.nombre STARTS WITH $q_lower
+      (
+        e.nombre CONTAINS $q OR e.nombre CONTAINS $q_upper OR e.nombre CONTAINS $q_lower
+        OR e.nombre STARTS WITH $q OR e.nombre STARTS WITH $q_upper OR e.nombre STARTS WITH $q_lower
+        OR e.nombre = $q OR e.nombre = $q_upper OR e.nombre = $q_lower
+      )
+      OR ($has_cif = true AND (e.nif = $q_upper OR e.nif = $q))
 
     WITH e,
       CASE
-        WHEN e.nif = $q_upper THEN 0
+        WHEN $has_cif = true AND (e.nif = $q_upper OR e.nif = $q) THEN 0
         WHEN e.nombre = $q OR e.nombre = $q_upper OR e.nombre = $q_lower THEN 1
         WHEN e.nombre STARTS WITH $q OR e.nombre STARTS WITH $q_upper OR e.nombre STARTS WITH $q_lower THEN 2
         ELSE 3
@@ -248,14 +244,70 @@ def search_contratos_by_empresa(query: str, k_empresas: int = 3, k_contratos: in
     ORDER BY empresa_match_rank ASC, importe_adjudicado DESC
     LIMIT $k_contratos
     """
-
     return neo4j_query(
         cypher,
         {
             "q": q,
             "q_upper": q_upper,
             "q_lower": q_lower,
+            "has_cif": has_cif,
             "k_empresas": k_empresas,
             "k_contratos": k_contratos,
         },
     )
+
+
+def empresa_awards_stats(query: str, k_empresas: int = 3) -> Optional[Dict[str, Any]]:
+    """Agregación determinística (sin LLM): cuenta contratos y suma importe adjudicado para la empresa."""
+    q = _clean_q(query)
+    if not q:
+        return None
+
+    q_upper = q.upper()
+    q_lower = q.lower()
+    has_cif = _looks_like_cif(q_upper)
+
+    cypher = """
+    MATCH (e:EmpresaRAG)
+    WHERE
+      (
+        e.nombre CONTAINS $q OR e.nombre CONTAINS $q_upper OR e.nombre CONTAINS $q_lower
+        OR e.nombre STARTS WITH $q OR e.nombre STARTS WITH $q_upper OR e.nombre STARTS WITH $q_lower
+        OR e.nombre = $q OR e.nombre = $q_upper OR e.nombre = $q_lower
+      )
+      OR ($has_cif = true AND (e.nif = $q_upper OR e.nif = $q))
+
+    WITH e,
+      CASE
+        WHEN $has_cif = true AND (e.nif = $q_upper OR e.nif = $q) THEN 0
+        WHEN e.nombre = $q OR e.nombre = $q_upper OR e.nombre = $q_lower THEN 1
+        WHEN e.nombre STARTS WITH $q OR e.nombre STARTS WITH $q_upper OR e.nombre STARTS WITH $q_lower THEN 2
+        ELSE 3
+      END AS match_rank
+    ORDER BY match_rank ASC, size(coalesce(e.nombre,'')) ASC
+    LIMIT $k_empresas
+
+    OPTIONAL MATCH (e)-[r:ADJUDICATARIA_RAG]->(c:ContratoRAG)
+    WITH e, match_rank,
+         count(DISTINCT c) AS contratos_ganados,
+         sum(coalesce(r.importe_adjudicado, r.importe, c.importe_adjudicado, 0)) AS importe_total
+    RETURN
+      coalesce(e.nombre,'') AS nombre,
+      coalesce(e.nif,'')    AS nif,
+      match_rank,
+      contratos_ganados,
+      importe_total
+    ORDER BY match_rank ASC, contratos_ganados DESC, importe_total DESC
+    LIMIT 1
+    """
+    rows = neo4j_query(
+        cypher,
+        {
+            "q": q,
+            "q_upper": q_upper,
+            "q_lower": q_lower,
+            "has_cif": has_cif,
+            "k_empresas": k_empresas,
+        },
+    )
+    return rows[0] if rows else None
