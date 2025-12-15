@@ -70,9 +70,9 @@ def _empresa_context_header(empresa_lookup: str, empresas: List[Dict[str, Any]])
     return "\n".join(lines)
 
 
-async def handle_generate_ppt(question: str):
+async def handle_generate_ppt(question: str, allow_clarifications: bool = True):
     plan = await cl.make_async(plan_ppt_clarifications)(question)
-    if plan["need_clarification"] and plan["questions"]:
+    if allow_clarifications and plan["need_clarification"] and plan["questions"]:
         cl.user_session.set("ppt_pending", True)
         cl.user_session.set("ppt_request_base", plan["normalized_request"])
         cl.user_session.set("ppt_questions", plan["questions"])
@@ -87,9 +87,11 @@ async def handle_generate_ppt(question: str):
         ).send()
         return
 
+    normalized_question = plan.get("normalized_request", question)
+
     await cl.Message(content="Generando PPT basado en un pliego de referencia del grafo…").send()
 
-    emb = await cl.make_async(embed_text)(question)
+    emb = await cl.make_async(embed_text)(normalized_question)
     if not emb:
         await cl.Message("No he podido calcular el embedding de la petición.").send()
         return
@@ -152,7 +154,7 @@ async def handle_generate_ppt(question: str):
         },
     )
 
-    system_msg, user_msg = build_ppt_generation_prompt_one_by_one(question, ref_data)
+    system_msg, user_msg = build_ppt_generation_prompt_one_by_one(normalized_question, ref_data)
 
     msg = cl.Message(content="")
     await msg.send()
@@ -251,7 +253,7 @@ async def on_message(message: cl.Message):
         cl.user_session.set("ppt_pending", False)
         cl.user_session.set("ppt_request_base", "")
         cl.user_session.set("ppt_questions", [])
-        await handle_generate_ppt(final_req)
+        await handle_generate_ppt(final_req, allow_clarifications=False)
         return
 
     history: List[Dict[str, str]] = cl.user_session.get("history", [])
