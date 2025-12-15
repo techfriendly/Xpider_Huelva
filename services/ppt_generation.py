@@ -32,7 +32,7 @@ Devuelve SOLO JSON válido:
 
 Instrucciones:
 - Resume y normaliza la petición.
-- Si faltan datos clave (objeto, cantidades, plazos, lugar), pide 2-3 preguntas.
+- Si faltan datos clave (objeto, cantidades, plazos, lugar), pide hasta 7 preguntas.
 - Si ya hay suficiente contexto, need_clarification=false y questions=[].
 
 Petición original:
@@ -48,6 +48,7 @@ Petición original:
     need = bool(data.get("need_clarification"))
     normalized = data.get("normalized_request") or user_request
     questions = data.get("questions") if isinstance(data.get("questions"), list) else []
+    questions = questions[:7]
     return {
         "need_clarification": need,
         "normalized_request": normalized,
