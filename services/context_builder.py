@@ -13,10 +13,13 @@ def build_context(question: str, contratos, capitulos, extractos) -> str:
     if contratos:
         parts.append("\n=== CONTRATOS RELEVANTES ===")
         for c in contratos:
-            snippet = clip(c.get("abstract", "") or "", 600)
+            snippet = clip(c.get("abstract", "") or "", 1000)
+            link = (c.get("link_contrato") or "").strip()
+            link_line = f"  Enlace: {link}\n" if link else ""
             parts.append(
                 f"- Expediente: {c.get('expediente') or 'N/D'} | Estado: {c.get('estado') or 'N/D'}\n"
                 f"  Título: {c.get('titulo') or 'N/D'}\n"
+                f"{link_line}"
                 f"  CPV principal: {c.get('cpv_principal') or 'N/D'}\n"
                 f"  Adjudicataria: {c.get('adjudicataria_nombre') or 'N/D'} "
                 f"(NIF: {c.get('adjudicataria_nif') or 'N/D'})\n"
@@ -49,8 +52,10 @@ def build_context(question: str, contratos, capitulos, extractos) -> str:
         "\n=== INSTRUCCIONES PARA EL MODELO ===\n"
         "Responde basándote EXCLUSIVAMENTE en el contexto anterior.\n"
         "Si no hay información suficiente, dilo.\n"
+        "Si un contrato incluye una línea 'Enlace:', inclúyela al citar ese contrato, pero sin enseñar todo el link.\n"
+        "Si lo crees conveniente, genera tablas para ofrecer resultados.\n"
         "No inventes datos.\n"
-        "Respuesta en castellano, clara y concisa."
+        "Respuesta en castellano, clara, breve y concisa."
     )
 
     ctx = "\n".join(parts)

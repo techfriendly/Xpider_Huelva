@@ -41,12 +41,13 @@ def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> Lis
     YIELD node, score
     OPTIONAL MATCH (e:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(node)
     RETURN
-      coalesce(node.contract_id, node.expediente, '') AS contract_id,
+      coalesce(node.expediente, '')    AS contract_id,
       coalesce(node.expediente,'')     AS expediente,
       coalesce(node.titulo,'')         AS titulo,
       coalesce(node.abstract,'')       AS abstract,
       coalesce(node.estado,'')         AS estado,
       coalesce(node.cpv_principal,'')  AS cpv_principal,
+      coalesce(node.contract_uri,'')   AS link_contrato,   
       e.nif                            AS adjudicataria_nif,
       e.nombre                         AS adjudicataria_nombre,
       node.presupuesto_sin_iva         AS presupuesto_sin_iva,
@@ -229,12 +230,13 @@ def search_contratos_by_empresa(query: str, k_empresas: int = 3, k_contratos: in
     WITH e, r, c, empresa_match_rank,
          coalesce(r.importe_adjudicado, r.importe, c.importe_adjudicado) AS importe_adj
     RETURN
-      coalesce(c.contract_id, c.expediente, '') AS contract_id,
-      coalesce(c.expediente, c.contract_id, '') AS expediente,
+      coalesce(c.expediente, '') AS contract_id,
+      coalesce(c.expediente, '') AS expediente,
       coalesce(c.titulo,'')   AS titulo,
       coalesce(c.abstract,'') AS abstract,
       coalesce(c.estado,'')   AS estado,
       coalesce(c.cpv_principal,'') AS cpv_principal,
+      coalesce(c.contract_uri,'')   AS link_contrato,   
       e.nif    AS adjudicataria_nif,
       e.nombre AS adjudicataria_nombre,
       c.presupuesto_sin_iva AS presupuesto_sin_iva,

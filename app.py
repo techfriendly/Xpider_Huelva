@@ -161,7 +161,7 @@ async def handle_generate_ppt(question: str):
         model=config.LLM_MODEL,
         messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
         max_tokens=6000,
-        temperature=0.3,
+        temperature=0.2,
         stream=True,
     )
 
@@ -441,9 +441,9 @@ async def on_message(message: cl.Message):
                 stream = llm_client.chat.completions.create(
                     model=config.LLM_MODEL,
                     messages=messages_llm,
-                    temperature=0.3,
+                    temperature=0.2,
                     stream=True,
-                    max_tokens=900,
+                    max_tokens=1200,
                 )
 
                 full_answer: List[str] = []
@@ -552,9 +552,9 @@ async def on_message(message: cl.Message):
         stream = llm_client.chat.completions.create(
             model=config.LLM_MODEL,
             messages=messages_llm,
-            temperature=0.3,
+            temperature=0.2,
             stream=True,
-            max_tokens=900,
+            max_tokens=1200,
         )
 
         full_answer: List[str] = []
