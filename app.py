@@ -72,10 +72,16 @@ def _empresa_context_header(empresa_lookup: str, empresas: List[Dict[str, Any]])
 
 async def handle_generate_ppt(question: str, allow_clarifications: bool = True):
     plan = await cl.make_async(plan_ppt_clarifications)(question)
-    if allow_clarifications and plan["need_clarification"] and plan["questions"]:
+    if (
+        allow_clarifications
+        and not cl.user_session.get("ppt_clarifications_sent", False)
+        and plan["need_clarification"]
+        and plan["questions"]
+    ):
         cl.user_session.set("ppt_pending", True)
         cl.user_session.set("ppt_request_base", plan["normalized_request"])
         cl.user_session.set("ppt_questions", plan["questions"])
+        cl.user_session.set("ppt_clarifications_sent", True)
 
         qtxt = "\n".join([f"{i+1}. {q}" for i, q in enumerate(plan["questions"])])
         await cl.Message(
@@ -196,6 +202,8 @@ async def handle_generate_ppt(question: str, allow_clarifications: bool = True):
     ppt_summary = await cl.make_async(summarize_for_memory)(pliego_text, config.MEMORY_SUMMARY_TOKENS)
     await cl.Message(content=f"Resumen del PPT (memoria corta):\n\n{ppt_summary}").send()
 
+    cl.user_session.set("ppt_clarifications_sent", False)
+
 
 @cl.on_chat_start
 async def on_chat_start():
@@ -203,6 +211,7 @@ async def on_chat_start():
     cl.user_session.set("ppt_pending", False)
     cl.user_session.set("ppt_request_base", "")
     cl.user_session.set("ppt_questions", [])
+    cl.user_session.set("ppt_clarifications_sent", False)
     cl.user_session.set(
         "router_state",
         {
@@ -253,7 +262,11 @@ async def on_message(message: cl.Message):
         cl.user_session.set("ppt_pending", False)
         cl.user_session.set("ppt_request_base", "")
         cl.user_session.set("ppt_questions", [])
+        history: List[Dict[str, str]] = cl.user_session.get("history", [])
         await handle_generate_ppt(final_req, allow_clarifications=False)
+        history.append({"role": "user", "content": final_req})
+        history.append({"role": "assistant", "content": f"PPT generado (fecha {config.TODAY_STR})."})
+        cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
         return
 
     history: List[Dict[str, str]] = cl.user_session.get("history", [])
