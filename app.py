@@ -225,16 +225,16 @@ async def on_chat_start():
             "last_extracto_tipos": None,
         },
     )
-    await clear_evidence_sidebar()
 
+    # 1) Mensaje inicial inmediatamente (reduce el “flash”)
     await cl.Message(
         content=(
             "Hola. Soy el asistente virtual del área de contratación de la Diputación Provincial de Huelva.\n\n"
-            "Puedo :\n"
+            "Puedo:\n"
             "- Responder preguntas y mostrar evidencias.\n"
             "- Consultar adjudicaciones por empresa (por nombre, y CIF si aplica).\n"
             "- Generar un PPT (te preguntaré si falta contexto) y descargarlo en Word.\n\n"
-            "Pruébame!"
+            "Pruébame:"
         ),
         actions=[
             cl.Action(
@@ -252,30 +252,14 @@ async def on_chat_start():
                 label="Top 10 empresas por importe adjudicado",
                 payload={"text": "Top 10 adjudicatarias por importe adjudicado"},
             ),
-        ]
+        ],
     ).send()
 
-
-@cl.action_callback("follow_up_question")
-async def on_follow_up_question(action: cl.Action):
-    payload = action.payload or {}
-    q = payload.get("question")
-    if not q:
-        return
-    await cl.Message(content=q).send()
-    await on_message(cl.Message(content=q))
-
-@cl.action_callback("quick_prompt")
-async def quick_prompt(action: cl.Action):
-    text = (action.payload or {}).get("text", "")
-    if not text:
-        return
-
-    # 1) Lo mostramos como si lo hubiera escrito el usuario (opcional pero queda natural)
-    await cl.Message(content=text).send()
-
-    # 2) Ejecutamos tu pipeline normal
-    await on_message(cl.Message(content=text))
+    # 2) Limpieza del sidebar después (no frena el primer render)
+    try:
+        await clear_evidence_sidebar()
+    except Exception:
+        pass
 
 
 @cl.on_message
