@@ -229,13 +229,30 @@ async def on_chat_start():
 
     await cl.Message(
         content=(
-            "Hola. Soy el asistente RAG/Cypher de contratos (Huelva).\n\n"
-            "Puedo:\n"
-            "- Responder preguntas (RAG) y mostrar evidencias a la derecha.\n"
+            "Hola. Soy el asistente virtual del área de contratación de la Diputación Provincial de Huelva.\n\n"
+            "Puedo :\n"
+            "- Responder preguntas y mostrar evidencias.\n"
             "- Consultar adjudicaciones por empresa (por nombre, y CIF si aplica).\n"
-            "- Contar/sumar/rankings (Cypher).\n"
-            "- Generar un PPT (te preguntaré si falta contexto) y descargarlo en Word.\n"
-        )
+            "- Generar un PPT (te preguntaré si falta contexto) y descargarlo en Word.\n\n"
+            "Pruébame!"
+        ),
+        actions=[
+            cl.Action(
+                name="quick_prompt",
+                label="¿Qué contratos ha ganado Techfriendly?",
+                payload={"text": "¿Qué contratos ha ganado Techfriendly?"},
+            ),
+            cl.Action(
+                name="quick_prompt",
+                label="Generar PPT vehículo 4x4",
+                payload={"text": "¿Me haces un pliego de prescripciones técnicas para el suministro de un vehículo 4x4?"},
+            ),
+            cl.Action(
+                name="quick_prompt",
+                label="Top 10 empresas por importe adjudicado",
+                payload={"text": "Top 10 adjudicatarias por importe adjudicado"},
+            ),
+        ]
     ).send()
 
 
@@ -247,6 +264,18 @@ async def on_follow_up_question(action: cl.Action):
         return
     await cl.Message(content=q).send()
     await on_message(cl.Message(content=q))
+
+@cl.action_callback("quick_prompt")
+async def quick_prompt(action: cl.Action):
+    text = (action.payload or {}).get("text", "")
+    if not text:
+        return
+
+    # 1) Lo mostramos como si lo hubiera escrito el usuario (opcional pero queda natural)
+    await cl.Message(content=text).send()
+
+    # 2) Ejecutamos tu pipeline normal
+    await on_message(cl.Message(content=text))
 
 
 @cl.on_message
@@ -389,12 +418,12 @@ async def on_message(message: cl.Message):
                     return
 
             # Resto de agregaciones => tu cypher_qa actual
-            thinking_msg.content = "Generando y ejecutando consulta Cypher (solo lectura)..."
+            thinking_msg.content = "Generando y ejecutando consulta a base de datos..."
             await thinking_msg.update()
 
             out = await cl.make_async(cypher_qa)(question)
             if out.get("error"):
-                await cl.Message(content=f"No he podido ejecutar Cypher QA.\nDetalle: {out.get('error')}").send()
+                await cl.Message(content=f"No he podido ejecutar consulta QA.\nDetalle: {out.get('error')}").send()
                 return
 
             answer = out["answer"]
@@ -405,7 +434,7 @@ async def on_message(message: cl.Message):
             history.append({"role": "assistant", "content": answer_mem})
             cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
 
-            thinking_msg.content = f"Respuesta generada (Cypher). Tokens aprox: enviados={estimate_tokens(question)}, generados={estimate_tokens(answer)}"
+            thinking_msg.content = f"Respuesta generada. Tokens aprox: enviados={estimate_tokens(question)}, generados={estimate_tokens(answer)}"
             await thinking_msg.update()
             return
 
