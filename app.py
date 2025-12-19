@@ -365,10 +365,19 @@ async def on_message(message: cl.Message):
 
                     await cl.Message(content=content).send()
 
-                    # Estado + memoria
-                    router_state["last_focus"] = "EMPRESA"
-                    router_state["last_empresa_query"] = empresa_lookup
-                    router_state["last_empresa_nif"] = nif if nif != "N/D" else intent.get("empresa_nif")
+                    # Estado + memoria (guardamos también contratos para permitir follow-ups contextualizados)
+                    router_state.update(
+                        {
+                            "last_focus": "EMPRESA",
+                            "last_empresa_query": empresa_lookup,
+                            "last_empresa_nif": nif if nif != "N/D" else intent.get("empresa_nif"),
+                            "last_contratos": contratos,
+                            "last_capitulos": [],
+                            "last_extractos": [],
+                            "last_doc_tipo": None,
+                            "last_extracto_tipos": None,
+                        }
+                    )
                     cl.user_session.set("router_state", router_state)
 
                     history.append({"role": "user", "content": question})

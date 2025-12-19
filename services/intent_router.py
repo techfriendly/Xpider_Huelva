@@ -286,6 +286,7 @@ Devuelve SOLO JSON válido:
   "doc_tipo": null | "PPT" | "PCAP",
   "extracto_tipos": null | ["normativas","solvencia_tecnica"],
   "needs_aggregation": true | false,
+  "is_followup": true | false,
 
   "focus": "CONTRATO" | "EMPRESA",
   "empresa_query": null | "nombre/razón social (preferible al CIF)",
@@ -331,6 +332,7 @@ Pregunta:
 
     empresa_query = _clean_empresa(data.get("empresa_query") or "")
     empresa_nif = _extract_cif(data.get("empresa_nif") or "") or _extract_cif(q)
+    is_followup = bool(data.get("is_followup"))
 
     return {
         "intent": intent,
@@ -338,7 +340,7 @@ Pregunta:
         "extracto_tipos": tipos,
         "needs_aggregation": needs_aggregation,
         "is_greeting": False,
-        "is_followup": False,
+        "is_followup": is_followup,
         "focus": focus,
         "empresa_query": empresa_query,
         "empresa_nif": empresa_nif,
