@@ -18,8 +18,8 @@ EMB_API_KEY = os.getenv("EMB_API_KEY", "dummy-key")
 EMB_MODEL = os.getenv("EMB_MODEL", "embedding")
 EMB_DIM = int(os.getenv("EMB_DIM", "1024"))
 
-K_CONTRATOS = int(os.getenv("K_CONTRATOS", "3"))
-K_CAPITULOS = int(os.getenv("K_CAPITULOS", "15"))
+K_CONTRATOS = int(os.getenv("K_CONTRATOS", "5"))
+K_CAPITULOS = int(os.getenv("K_CAPITULOS", "25"))
 K_EXTRACTOS = int(os.getenv("K_EXTRACTOS", "50"))
 
 MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "12"))
