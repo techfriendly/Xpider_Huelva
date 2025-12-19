@@ -45,6 +45,12 @@ _RE_PREV_TEXT = re.compile(
     re.IGNORECASE,
 )
 
+_RE_FOLLOWUP_HINT = re.compile(r"^\s*(y|adem[aá]s|ademas|tamb[ií]en|otra\s+cosa)\b", re.IGNORECASE)
+_RE_FOLLOWUP_KEYWORDS = re.compile(
+    r"\b(importe|presupuesto|duraci[oó]n|plazo|fecha|cuando|qu[ií]en|c[uú]al(es)?|detalles?)\b",
+    re.IGNORECASE,
+)
+
 
 def _normalize_extracto_types(tipos: Any) -> Optional[List[str]]:
     if not isinstance(tipos, list):
@@ -79,6 +85,26 @@ def _extract_cif(text: str) -> Optional[str]:
         return None
     m = _CIF_RE.search(text.upper())
     return m.group(1).upper() if m else None
+
+
+def _is_contextual_followup(q: str, history: Optional[List[Dict[str, str]]], last_state: Dict[str, Any]) -> bool:
+    """Heurística para detectar preguntas dependientes del contexto previo."""
+    if not history or not last_state:
+        return False
+    if len(q) > 160:
+        return False
+    if _clean_empresa(q):
+        return False  # Parece una nueva entidad, mejor no forzar follow-up.
+
+    low = q.lower()
+    if _RE_FOLLOWUP_HINT.match(q):
+        return True
+    if "?" in q and _RE_FOLLOWUP_KEYWORDS.search(low):
+        return True
+    if len(q.split()) <= 8 and _RE_FOLLOWUP_KEYWORDS.search(low):
+        return True
+
+    return False
 
 
 def detect_intent(
@@ -235,7 +261,21 @@ def detect_intent(
                 "empresa_nif": _extract_cif(q),
             }
 
-    # 10) Fallback LLM router (tu lógica original ampliada)
+    # 10) Follow-up contextual (preguntas cortas sobre la respuesta previa)
+    if _is_contextual_followup(q, history, last_state):
+        return {
+            "intent": "RAG_QA",
+            "doc_tipo": last_state.get("last_doc_tipo"),
+            "extracto_tipos": last_state.get("last_extracto_tipos"),
+            "needs_aggregation": False,
+            "is_greeting": False,
+            "is_followup": True,
+            "focus": last_focus or "CONTRATO",
+            "empresa_query": last_state.get("last_empresa_query"),
+            "empresa_nif": last_state.get("last_empresa_nif"),
+        }
+
+    # 11) Fallback LLM router (tu lógica original ampliada)
     prompt = f"""
 Fecha actual: {config.TODAY_STR}
 
