@@ -296,8 +296,8 @@ async def on_message(message: cl.Message):
                 content=(
                     "Hola. Dime qué necesitas buscar.\n\n"
                     "Ejemplos:\n"
-                    "- \"Qué contratos ha ganado Techfriendly\"\n"
-                    "- \"Cuántos contratos ha ganado Vodafone\"\n"
+                    "- \"¿Qué contratos ha ganado Techfriendly?\"\n"
+                    "- \"¿Me haces un pliego de prescripciones técnicas para el Suministro de un vehículo 4x4 para el servicio forestal?\"\n"
                     "- \"Top 10 adjudicatarias por importe adjudicado\""
                 )
             ).send()
@@ -440,11 +440,25 @@ async def on_message(message: cl.Message):
                 if embedding:
                     doc_tipo = intent.get("doc_tipo")
                     tipos = intent.get("extracto_tipos")
-                    allowed = {c.get("expediente") for c in contratos if c.get("expediente")}
-                    cap_tmp = await cl.make_async(search_capitulos)(embedding, max(config.K_CAPITULOS * 6, 30), doc_tipo)
-                    ex_tmp = await cl.make_async(search_extractos)(embedding, max(config.K_EXTRACTOS * 6, 50), tipos, doc_tipo)
-                    capitulos = [c for c in cap_tmp if c.get("expediente") in allowed][: config.K_CAPITULOS]
-                    extractos = [e for e in ex_tmp if e.get("expediente") in allowed][: config.K_EXTRACTOS]
+                    allowed = [c.get("expediente") for c in contratos if c.get("expediente")]
+                    seen = set()
+                    allowed = [x for x in allowed if x and not (x in seen or seen.add(x))]
+
+                    capitulos = await cl.make_async(search_capitulos)(
+                        embedding,
+                        k=config.K_CAPITULOS,
+                        doc_tipo=doc_tipo,
+                        expedientes=allowed,
+                    )
+
+                    extractos = await cl.make_async(search_extractos)(
+                        embedding,
+                        k=config.K_EXTRACTOS,
+                        tipos=tipos,
+                        doc_tipo=doc_tipo,
+                        expedientes=allowed,
+                    )
+
 
                 evidence_md = build_evidence_markdown(contratos, capitulos, extractos)
                 context = build_context(question, contratos, capitulos, extractos)
@@ -551,14 +565,29 @@ async def on_message(message: cl.Message):
 
         use_cached_context = bool(intent.get("is_followup") and router_state.get("last_contratos"))
         if use_cached_context:
-            thinking_msg.content = "Reutilizando el contexto previo para el seguimiento..."
-            await thinking_msg.update()
-
             contratos = router_state.get("last_contratos", [])
-            capitulos = router_state.get("last_capitulos", [])
-            extractos = router_state.get("last_extractos", [])
-            doc_tipo = router_state.get("last_doc_tipo")
-            tipos = router_state.get("last_extracto_tipos")
+            contratos = _normalize_contrato_keys(contratos)
+
+            # Doc tipo / tipos: si el intent trae algo nuevo, debe sobrescribir.
+            doc_tipo = intent.get("doc_tipo") or router_state.get("last_doc_tipo")
+            tipos = intent.get("extracto_tipos") or router_state.get("last_extracto_tipos")
+
+            # Embedding del follow-up (para buscar solo dentro del/los contratos anteriores)
+            embedding = await cl.make_async(embed_text)(question)
+            if not embedding:
+                thinking_msg.content = "No he podido generar el embedding para el seguimiento."
+                await thinking_msg.update()
+                return
+
+            allowed = [c.get("expediente") for c in contratos if c.get("expediente")]
+            # Dedup
+            seen = set()
+            allowed = [x for x in allowed if x and not (x in seen or seen.add(x))]
+
+            # IMPORTANTE: estas funciones deben aceptar "expedientes" como filtro
+            capitulos = await cl.make_async(search_capitulos)(embedding, config.K_CAPITULOS, doc_tipo, allowed)
+            extractos = await cl.make_async(search_extractos)(embedding, config.K_EXTRACTOS, tipos, doc_tipo, allowed)
+
         else:
             embedding = await cl.make_async(embed_text)(question)
             if not embedding:

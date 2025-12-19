@@ -38,19 +38,19 @@ _RE_IMPORTE_TOTAL = re.compile(
 _RE_Y_SIMPLE = re.compile(r"^\s*y\s+(.+?)\s*[?¿!]*\s*$", re.IGNORECASE)
 
 # Follow-up anafórico: "sobre el texto anterior / ese contrato"
-_RE_PREV_TEXT = re.compile(
-    r"\b(sobre|respecto|acerca)\s+(del?|de la|de los|de las)?\s+"
-    r"(texto|contrato|expediente|pliego)\s+(anterior|previo|último|ultimo)\b"
-    r"|\b(sobre|de|del|de la)\s+(ese|ese mismo|dicho)\s+(contrato|expediente|texto)\b",
+_RE_PREV_REF = re.compile(
+    r"\b(ese|este|esa|esta|dicho|anterior|previo|último|ultimo)\s+(contrato|expediente|pliego|texto)\b"
+    r"|\b(en|sobre|respecto\s+a|acerca\s+de|del|de\s+la)\s+"
+    r"(ese|este|esa|esta|dicho|anterior|previo|último|ultimo)\s+(contrato|expediente|pliego|texto)\b",
     re.IGNORECASE,
 )
 
 _RE_FOLLOWUP_HINT = re.compile(r"^\s*(y|adem[aá]s|ademas|tamb[ií]en|otra\s+cosa)\b", re.IGNORECASE)
 _RE_FOLLOWUP_KEYWORDS = re.compile(
-    r"\b(importe|presupuesto|duraci[oó]n|plazo|fecha|cuando|qu[ií]en|c[uú]al(es)?|detalles?)\b",
+    r"\b(importe|presupuesto|duraci[oó]n|plazo|fecha|cuando|qu[ií]en|c[uú]al(es)?|detalles?"
+    r"|normativa|ley|lcsp|rglcap|ens|protecci[oó]n\s+de\s+datos|rgpd)\b",
     re.IGNORECASE,
 )
-
 
 def _normalize_extracto_types(tipos: Any) -> Optional[List[str]]:
     if not isinstance(tipos, list):
@@ -183,7 +183,7 @@ def detect_intent(
             }
 
     # 5) Follow-up anafórico: "sobre el texto anterior / ese contrato"
-    if _RE_PREV_TEXT.search(q) and last_focus in {"CONTRATO", "EMPRESA"}:
+    if _RE_PREV_REF.search(q) and last_state.get("last_contratos"):
         return {
             "intent": "RAG_QA",
             "doc_tipo": last_state.get("last_doc_tipo"),

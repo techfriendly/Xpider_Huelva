@@ -80,7 +80,7 @@ def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> Lis
       e.nombre                                 AS adjudicataria_nombre,
       c.presupuesto_sin_iva                    AS presupuesto_sin_iva,
       c.valor_estimado                         AS valor_estimado,
-      coalesce(r.importe_adjudicado, r.importe, c.importe_adjudicado) AS importe_adjudicado,
+      coalesce(r.importe_adjudicado, c.importe_adjudicado) AS importe_adjudicado,
       score
     ORDER BY score DESC
     LIMIT $k
@@ -94,14 +94,24 @@ def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> Lis
     return neo4j_query(cypher, params)
 
 
-def search_capitulos(embedding: List[float], k: int = config.K_CAPITULOS, doc_tipo: Optional[str] = None) -> List[Dict[str, Any]]:
+def search_capitulos(
+    embedding: List[float],
+    k: int = config.K_CAPITULOS,
+    doc_tipo: Optional[str] = None,
+    expedientes: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     if not embedding:
         return []
+
+    # Si filtramos por expedientes, sobremuestreamos para no quedarnos a 0 tras el WHERE
+    k_query = k if not expedientes else max(k * 25, 200)
+
     cypher = """
-    CALL db.index.vector.queryNodes('capitulo_embedding', $k, $embedding)
+    CALL db.index.vector.queryNodes('capitulo_embedding', $k_query, $embedding)
     YIELD node, score
     MATCH (c:ContratoRAG)-[td:TIENE_DOC]->(d:DocumentoRAG)-[:TIENE_CAPITULO]->(node)
     WHERE ($doc_tipo IS NULL OR td.tipo_doc = $doc_tipo)
+      AND ($expedientes IS NULL OR c.expediente IN $expedientes)
     RETURN
       node.cap_id                   AS cap_id,
       coalesce(node.heading,'')     AS heading,
@@ -112,8 +122,13 @@ def search_capitulos(embedding: List[float], k: int = config.K_CAPITULOS, doc_ti
       coalesce(c.titulo,'')         AS contrato_titulo,
       score
     ORDER BY score DESC
+    LIMIT $k
     """
-    return neo4j_query(cypher, {"k": k, "embedding": embedding, "doc_tipo": doc_tipo})
+    return neo4j_query(
+        cypher,
+        {"k_query": k_query, "k": k, "embedding": embedding, "doc_tipo": doc_tipo, "expedientes": expedientes},
+    )
+
 
 
 def search_extractos(
@@ -121,16 +136,21 @@ def search_extractos(
     k: int = config.K_EXTRACTOS,
     tipos: Optional[List[str]] = None,
     doc_tipo: Optional[str] = None,
+    expedientes: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     if not embedding:
         return []
+
+    k_query = k if not expedientes else max(k * 25, 200)
+
     cypher = """
-    CALL db.index.vector.queryNodes('extracto_embedding', $k, $embedding)
+    CALL db.index.vector.queryNodes('extracto_embedding', $k_query, $embedding)
     YIELD node, score
     WITH node, score
     WHERE ($tipos IS NULL OR size($tipos)=0 OR node.tipo IN $tipos)
     MATCH (c:ContratoRAG)-[td:TIENE_DOC]->(d:DocumentoRAG)-[:TIENE_EXTRACTO]->(node)
     WHERE ($doc_tipo IS NULL OR td.tipo_doc = $doc_tipo)
+      AND ($expedientes IS NULL OR c.expediente IN $expedientes)
     RETURN
       node.extracto_id               AS extracto_id,
       coalesce(node.tipo,'')         AS tipo,
@@ -141,8 +161,20 @@ def search_extractos(
       coalesce(c.titulo,'')          AS contrato_titulo,
       score
     ORDER BY score DESC
+    LIMIT $k
     """
-    return neo4j_query(cypher, {"k": k, "embedding": embedding, "tipos": tipos or [], "doc_tipo": doc_tipo})
+    return neo4j_query(
+        cypher,
+        {
+            "k_query": k_query,
+            "k": k,
+            "embedding": embedding,
+            "tipos": tipos or [],
+            "doc_tipo": doc_tipo,
+            "expedientes": expedientes,
+        },
+    )
+
 
 
 # -----------------------------
@@ -180,7 +212,7 @@ def search_empresas(query: str, k_empresas: int = 5, max_adjudicaciones: int = 1
 
     OPTIONAL MATCH (e)-[r:ADJUDICATARIA_RAG]->(c:ContratoRAG)
     WITH e, match_rank, r, c,
-         coalesce(r.importe_adjudicado, r.importe, c.importe_adjudicado, 0) AS importe
+         coalesce(r.importe_adjudicado, c.importe_adjudicado, 0) AS importe
     ORDER BY match_rank ASC, importe DESC
 
     WITH
@@ -327,7 +359,7 @@ def empresa_awards_stats(query: str, k_empresas: int = 3) -> Optional[Dict[str, 
     OPTIONAL MATCH (e)-[r:ADJUDICATARIA_RAG]->(c:ContratoRAG)
     WITH e, match_rank,
          count(DISTINCT c) AS contratos_ganados,
-         sum(coalesce(r.importe_adjudicado, r.importe, c.importe_adjudicado, 0)) AS importe_total
+         sum(coalesce(r.importe_adjudicado, c.importe_adjudicado, 0)) AS importe_total
     RETURN
       coalesce(e.nombre,'') AS nombre,
       coalesce(e.nif,'')    AS nif,
