@@ -258,8 +258,22 @@ async def on_chat_start():
     # 2) Limpieza del sidebar después (no frena el primer render)
     try:
         await clear_evidence_sidebar()
-    except Exception:
+    except Ecxception:
         pass
+
+
+@cl.action_callback("quick_prompt")
+async def quick_prompt(action: cl.Action):
+    text = (action.payload or {}).get("text", "")
+    if not text:
+        return
+
+    # 1) Lo mostramos como si lo hubiera escrito el usuario (opcional pero queda natural)
+    await cl.Message(content=text).send()
+
+    # 2) Ejecutamos tu pipeline normal
+    await on_message(cl.Message(content=text))
+
 
 
 @cl.on_message
