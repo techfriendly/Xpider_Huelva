@@ -93,7 +93,10 @@ def _is_contextual_followup(q: str, history: Optional[List[Dict[str, str]]], las
         return False
     if len(q) > 160:
         return False
-    if _clean_empresa(q):
+
+    empresa_candidate = _clean_empresa(q)
+    # Solo lo tratamos como nueva entidad si parece una mención directa y breve (p.ej. "y Vodafone?")
+    if empresa_candidate and len(empresa_candidate.split()) <= 6 and not _RE_FOLLOWUP_KEYWORDS.search(q.lower()):
         return False  # Parece una nueva entidad, mejor no forzar follow-up.
 
     low = q.lower()
