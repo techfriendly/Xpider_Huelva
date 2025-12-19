@@ -274,7 +274,14 @@ async def quick_prompt(action: cl.Action):
     # 2) Ejecutamos tu pipeline normal
     await on_message(cl.Message(content=text))
 
-
+@cl.action_callback("follow_up_question")
+async def on_follow_up_question(action: cl.Action):
+    payload = action.payload or {}
+    q = payload.get("question")
+    if not q:
+        return
+    await cl.Message(content=q).send()
+    await on_message(cl.Message(content=q))
 
 @cl.on_message
 async def on_message(message: cl.Message):
