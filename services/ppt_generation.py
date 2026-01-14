@@ -1,4 +1,16 @@
-"""Flujo de preparación de Pliegos de Prescripciones Técnicas."""
+"""
+GENERADOR DE PLIEGOS (PPT): ppt_generation.py
+DESCRIPCIÓN:
+Este módulo se encarga de redactar documentos técnicos (Pliegos de Prescripciones Técnicas)
+basándose en contratos previos similares.
+
+Funciona en variar fases:
+1. PLANIFICACIÓN: El LLM decide si faltan datos (presupuesto, uso, características).
+2. REFERENCIA: Busca en Neo4j un contrato similar que tenga PPT (Pliego) adjunto.
+3. GENERACIÓN: Le pasa al LLM la estructura del contrato antiguo para que la use de esqueleto.
+4. EXPORTACIÓN: Convierte el texto Markdown resultante a un archivo Word (.docx).
+"""
+
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -8,36 +20,26 @@ from services.embeddings import embed_text
 from services.neo4j_queries import neo4j_query, search_capitulos, search_extractos
 from chat_utils.json_utils import safe_json_loads
 from chat_utils.text_utils import clip
+from chat_utils.prompt_loader import load_prompt
 
+# Intentamos importar librería python-docx para crear Word. Si falla, el bot funcionará pero sin exportar archivo.
 try:
     from docx import Document
-
     HAS_DOCX = True
 except Exception:
     HAS_DOCX = False
 
 
 def plan_ppt_clarifications(user_request: str) -> Dict[str, Any]:
-    prompt = f"""
-Fecha: {config.TODAY_STR}
-
-Eres un planificador para redactar un Pliego de Prescripciones Técnicas (PPT).
-Tu tarea es decidir si necesitas aclaraciones antes de redactar.
-Devuelve SOLO JSON válido:
-{{
-  "need_clarification": true|false,
-  "normalized_request": "...",
-  "questions": ["..."]
-}}
-
-Instrucciones:
-- Resume y normaliza la petición.
-- Si faltan datos clave (objeto, cantidades, plazos, lugar), pide hasta 7 preguntas.
-- Si ya hay suficiente contexto, need_clarification=false y questions=[].
-
-Petición original:
-\"\"\"{user_request}\"\"\"
-"""
+    """
+    Analiza si la petición del usuario ("Hazme un pliego para un coche") es suficiente
+    o si faltan detalles importantes para escribir algo decente.
+    """
+    prompt = load_prompt(
+        "ppt_clarification",
+        today=config.TODAY_STR,
+        user_request=user_request
+    )
     resp = llm_client.chat.completions.create(
         model=config.LLM_MODEL,
         messages=[{"role": "system", "content": "Devuelve SOLO JSON."}, {"role": "user", "content": prompt}],
@@ -45,10 +47,12 @@ Petición original:
         max_tokens=500,
     )
     data = safe_json_loads(resp.choices[0].message.content or "") or {}
+    
     need = bool(data.get("need_clarification"))
     normalized = data.get("normalized_request") or user_request
     questions = data.get("questions") if isinstance(data.get("questions"), list) else []
-    questions = questions[:7]
+    questions = questions[:7] # Limitamos preguntas para no aburrir
+    
     return {
         "need_clarification": need,
         "normalized_request": normalized,
@@ -57,15 +61,23 @@ Petición original:
 
 
 def find_reference_ppt_contract(question_embedding: List[float], top_k: int = 10) -> Optional[Dict[str, Any]]:
+    """
+    Busca en el grafo el contrato "más parecido" que tenga un documento PPT (tipo_doc='PPT').
+    Usa búsqueda vectorial sobre los capítulos.
+    """
+    # 1. Buscamos capítulos que se parezcan a la idea del usuario
     candidatos = search_capitulos(question_embedding, k=top_k, doc_tipo="PPT")
+    
+    # 2. De los capítulos encontrados, verificamos cuál pertenece a un PPT válido en la base de datos
     for c in candidatos:
         cid = c.get("contract_id")
         if not cid:
             continue
+            
         rows = neo4j_query(
             """
-            MATCH (c:ContratoRAG {contract_id: $cid})-[td:TIENE_DOC]->(d:DocumentoRAG)
-            WHERE td.tipo_doc = 'PPT'
+            MATCH (c:ContratoRAG)-[td:TIENE_DOC]->(d:DocumentoRAG)
+            WHERE (c.contract_id = $cid OR c.expediente = $cid) AND td.tipo_doc = 'PPT'
             RETURN d.doc_id AS doc_id
             LIMIT 1
             """,
@@ -73,15 +85,20 @@ def find_reference_ppt_contract(question_embedding: List[float], top_k: int = 10
         )
         if rows:
             c["doc_id"] = rows[0]["doc_id"]
-            return c
+            return c # Devolvemos el primer candidato válido
+            
     return None
 
 
 def get_ppt_reference_data(contract_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Recupera TODOS los capítulos del PPT de referencia, ordenados.
+    Esto sirve para que el LLM copie la estructura (Índice, apartados legales, técnicos...).
+    """
     rows = neo4j_query(
         """
-        MATCH (c:ContratoRAG {contract_id: $cid})-[td:TIENE_DOC]->(d:DocumentoRAG)
-        WHERE td.tipo_doc = 'PPT'
+        MATCH (c:ContratoRAG)-[td:TIENE_DOC]->(d:DocumentoRAG)
+        WHERE (c.contract_id = $cid OR c.expediente = $cid) AND td.tipo_doc = 'PPT'
         OPTIONAL MATCH (d)-[:TIENE_CAPITULO]->(cap:Capitulo)
         RETURN
           c.titulo     AS contrato_titulo,
@@ -105,6 +122,7 @@ def get_ppt_reference_data(contract_id: str) -> Optional[Dict[str, Any]]:
             "heading": r.get("heading"),
             "orden": r.get("orden"),
             "texto": r.get("texto") or "",
+            # NOTA: En el futuro podríamos filtrar textos muy largos aquí
         })
 
     return {
@@ -117,16 +135,21 @@ def get_ppt_reference_data(contract_id: str) -> Optional[Dict[str, Any]]:
 
 
 def build_ppt_generation_prompt_one_by_one(user_request: str, ref_data: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Construye el 'Megaprompt' para que el LLM escriba el documento.
+    Le inyectamos los capítulos de referencia para que los use de "inspiración estructural".
+    """
     exp = ref_data.get("expediente") or "N/D"
     titulo_ref = ref_data.get("contrato_titulo") or "N/D"
     caps = ref_data.get("capitulos") or []
 
+    # Construimos un texto con los capítulos de referencia
     cap_blocks = []
-    for c in caps[:18]:
+    for c in caps[:18]: # Limitamos a 18 capítulos para no explotar la ventana de contexto
         heading = c.get("heading") or "N/D"
         orden = c.get("orden")
         texto = c.get("texto") or ""
-        snippet = clip(texto, 1200)
+        snippet = clip(texto, 1200) # Recortamos textos muy largos
         cap_blocks.append(
             f"### Capítulo {orden}. {heading}\n"
             f"Contenido de referencia (no copiar literal):\n"
@@ -134,51 +157,21 @@ def build_ppt_generation_prompt_one_by_one(user_request: str, ref_data: Dict[str
         )
     caps_ref_text = "\n".join(cap_blocks) if cap_blocks else "N/D"
 
-    system_msg = (
-        "Eres un redactor experto en Pliegos de Prescripciones Técnicas (PPT). "
-        "Redactas de forma original, técnica y clara. "
-        "Sigues la estructura del pliego de referencia y te inspiras en su contenido capítulo a capítulo, "
-        "pero SIN copiar literal."
+    system_msg = load_prompt("ppt_generation_system")
+
+    user_msg = load_prompt(
+        "ppt_generation_user",
+        today=config.TODAY_STR,
+        user_request=user_request,
+        exp=exp,
+        titulo_ref=titulo_ref,
+        caps_ref_text=caps_ref_text
     )
-
-    user_msg = f"""
-Fecha actual: {config.TODAY_STR}
-
-Se te pide redactar un **Pliego de Prescripciones Técnicas (PPT)**.
-
-0) TITULACIÓN
-- Comienza el documento con un título en H1:
-  "# Pliego de Prescripciones Técnicas: <TÍTULO CONCRETO Y DESCRIPTIVO>"
-  (El título debe reflejar el objeto real del encargo del usuario).
-
-1) Encargo del usuario (objeto y contexto)
-{user_request}
-
-2) Pliego de referencia principal
-- Expediente: {exp}
-- Título del contrato de referencia: {titulo_ref}
-
-3) Estructura y contenido del pliego de referencia (capítulo a capítulo)
-Debes seguir la MISMA estructura de capítulos (mismos niveles), adaptando títulos y contenido al nuevo objeto.
-NO copies literal. Para cada capítulo, redacta el capítulo equivalente para el nuevo PPT.
-
-{caps_ref_text}
-
-INSTRUCCIONES MUY IMPORTANTES:
-- Redacta capítulo a capítulo en el mismo orden y con encabezados `##`.
-- Tras cada capítulo, añade SIEMPRE un bloque en cursiva con el encabezado:
-  _Recomendaciones para mejorar el pliego:_
-  _- ..._
-  _- ..._
-  _- ..._
-- Las recomendaciones deben ser prácticas: qué faltaría para mejorar ese capítulo en una licitación real.
-- No inventes normativa nueva; si mencionas normativa, hazlo prudente y coherente.
-- Devuelve SOLO el PPT en Markdown (sin comentarios fuera del pliego).
-"""
     return system_msg.strip(), user_msg.strip()
 
 
 def slug_filename(title: str, max_len: int = 80) -> str:
+    """Convierte un título de documento ("Hola Mundo") en un nombre de archivo seguro ("hola-mundo")."""
     t = (title or "PPT").strip().lower()
     t = re.sub(r"[^\w\s-]", "", t, flags=re.UNICODE)
     t = re.sub(r"\s+", "-", t).strip("-")
@@ -188,22 +181,34 @@ def slug_filename(title: str, max_len: int = 80) -> str:
 
 
 def ppt_to_docx_bytes(md_text: str, title: str = "Pliego de Prescripciones Técnicas") -> bytes:
+    """
+    Convierte el texto Markdown generado por el LLM a un archivo binario .docx (Word).
+    Interpreta encabezados (##) para crear la estructura del documento.
+    """
     if not HAS_DOCX:
         return b""
+        
     doc = Document()
     doc.add_heading(title, level=1)
+    
+    # Parseo muy simple línea a línea
     for line in (md_text or "").splitlines():
         line = line.rstrip()
         if not line:
             continue
+        # Título principal ya puesto, ignoramos si se repite
         if line.startswith("# "):
             continue
+        # Subtítulos
         if line.startswith("## "):
             doc.add_heading(line.replace("## ", "").strip(), level=2)
+        elif line.startswith("### "):
+            doc.add_heading(line.replace("### ", "").strip(), level=3)
         else:
-            doc.add_paragraph(line)
+            doc.add_paragraph(line) # Párrafo normal
+            
+    # Guardar en memoria (BytesIO) para enviarlo sin escribir en disco
     from io import BytesIO
-
     buf = BytesIO()
     doc.save(buf)
     return buf.getvalue()

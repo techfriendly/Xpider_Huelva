@@ -1,53 +1,71 @@
-"""Consultas y búsquedas sobre Neo4j (vector + empresa/adjudicaciones)."""
+"""
+CONSULTAS NEO4J: neo4j_queries.py
+DESCRIPCIÓN:
+Este archivo contiene las "recetas" (queries Cypher) predefinidas para buscar en el Grafo.
+Aquí NO usamos IA para generar el código SQL/Cypher, sino que ya lo tenemos optimizado manualmente.
+
+Funciones principales:
+- Búsqueda Vectorial (se busca por significado semántico).
+- Búsqueda de Empresas (por nombre o NIF).
+- Estadísticas de Adjudicaciones.
+"""
+
 import re
 from typing import Any, Dict, List, Optional
-
 import config
 from clients import driver
 
-
+# Expresión regular para detectar CIFs (Letra + 8 números)
 _CIF_RE = re.compile(r"\b([A-Z]\d{8})\b", re.IGNORECASE)
 
-
+# --- FUNCIÓN BASE DE EJECUCIÓN ---
 def neo4j_query(cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Ejecuta una sentencia Cypher y devuelve la lista de resultados como diccionarios."""
     if params is None:
         params = {}
     with driver.session(database=config.NEO4J_DB) as session:
         res = session.run(cypher, **params)
         return [r.data() for r in res]
 
-
+# --- UTILIDADES ---
 def _clean_q(q: str) -> str:
+    """Limpia la consulta de espacios extra y puntuación."""
     q = (q or "").strip()
     q = q.strip(" ?¿!.,;:")
     q = re.sub(r"\s{2,}", " ", q)
     return q
 
-
 def _looks_like_cif(q: str) -> bool:
+    """True si el texto parece un CIF válido."""
     if not q:
         return False
     return bool(_CIF_RE.search(q.strip().upper()))
 
 
 # -----------------------------
-# Vector search
+# BÚSQUEDA VECTORIAL (RAG)
+# Buscamos nodos que se parezcan semánticamente a la pregunta.
 # -----------------------------
+
 def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> List[Dict[str, Any]]:
+    """
+    Busca contratos relevantes usando el vector de la pregunta.
+    Combina coincidencias directas en el contrato, en sus capítulos o en sus extractos.
+    """
     if not embedding:
         return []
+        
     cypher = """
-    // Mezclamos coincidencias en contratos, capítulos y extractos para priorizar contratos
-    // que tienen contenido relevante asociado.
+    // 1. Buscamos en 3 índices diferentes a la vez (Contratos, Capítulos, Extractos)
     CALL {
-      // Vector search directa sobre contratos
+      // A) Vector search directa sobre nodos Contrato
       CALL db.index.vector.queryNodes('contrato_rag_embedding', $k, $embedding)
       YIELD node, score
       RETURN coalesce(node.contract_id, node.expediente, '') AS contract_id, score
 
       UNION
 
-      // Contratos cuyo PPT tiene capítulos relevantes
+      // B) Contratos cuyo Pliego (PPT) tiene capítulos relevantes
       CALL db.index.vector.queryNodes('capitulo_embedding', $k_capitulos, $embedding)
       YIELD node, score
       MATCH (c:ContratoRAG)-[:TIENE_DOC]->(:DocumentoRAG)-[:TIENE_CAPITULO]->(node)
@@ -55,16 +73,18 @@ def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> Lis
 
       UNION
 
-      // Contratos con extractos relevantes
+      // C) Contratos con extractos (resúmenes) relevantes de Normativa
       CALL db.index.vector.queryNodes('extracto_embedding', $k_extractos, $embedding)
       YIELD node, score
       MATCH (c:ContratoRAG)-[:TIENE_DOC]->(:DocumentoRAG)-[:TIENE_EXTRACTO]->(node)
       WHERE node.tipo = "normativa"
       RETURN coalesce(c.contract_id, c.expediente, '') AS contract_id, score
     }
+    // 2. Agregamos y nos quedamos con la mejor puntuación por contrato
     WITH contract_id, max(score) AS score
     WHERE contract_id <> ''
 
+    // 3. Recuperamos los datos completos del Contrato y su Adjudicataria
     MATCH (c:ContratoRAG)
     WHERE c.contract_id = contract_id OR c.expediente = contract_id
     OPTIONAL MATCH (e:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(c)
@@ -80,7 +100,7 @@ def search_contratos(embedding: List[float], k: int = config.K_CONTRATOS) -> Lis
       e.nombre                                 AS adjudicataria_nombre,
       c.presupuesto_sin_iva                    AS presupuesto_sin_iva,
       c.valor_estimado                         AS valor_estimado,
-      coalesce(r.importe_adjudicado, c.importe_adjudicado) AS importe_adjudicado,
+      coalesce(r.importe_adjudicado, 0)        AS importe_adjudicado,
       score
     ORDER BY score DESC
     LIMIT $k
@@ -100,18 +120,22 @@ def search_capitulos(
     doc_tipo: Optional[str] = None,
     expedientes: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    """Busca capítulos específicos dentro de los documentos (PPT, PCAP)."""
     if not embedding:
         return []
 
-    # Si filtramos por expedientes, sobremuestreamos para no quedarnos a 0 tras el WHERE
+    # Si filtramos por expediente, traemos más candidatos iniciales para no quedarnos cortos al filtrar
     k_query = k if not expedientes else max(k * 25, 200)
 
     cypher = """
     CALL db.index.vector.queryNodes('capitulo_embedding', $k_query, $embedding)
     YIELD node, score
     MATCH (c:ContratoRAG)-[td:TIENE_DOC]->(d:DocumentoRAG)-[:TIENE_CAPITULO]->(node)
+    
+    // Filtros opcionales (Tipo de doc y Expediente específico)
     WHERE ($doc_tipo IS NULL OR td.tipo_doc = $doc_tipo)
       AND ($expedientes IS NULL OR c.expediente IN $expedientes)
+      
     RETURN
       node.cap_id                   AS cap_id,
       coalesce(node.heading,'')     AS heading,
@@ -130,7 +154,6 @@ def search_capitulos(
     )
 
 
-
 def search_extractos(
     embedding: List[float],
     k: int = config.K_EXTRACTOS,
@@ -138,6 +161,7 @@ def search_extractos(
     doc_tipo: Optional[str] = None,
     expedientes: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    """Busca fragmentos específicos clasificados (ej: Solvencia técnica, Criterios de adjudicación)."""
     if not embedding:
         return []
 
@@ -147,10 +171,13 @@ def search_extractos(
     CALL db.index.vector.queryNodes('extracto_embedding', $k_query, $embedding)
     YIELD node, score
     WITH node, score
+    // Filtro por tipo de extracto (ej: 'solvencia')
     WHERE ($tipos IS NULL OR size($tipos)=0 OR node.tipo IN $tipos)
+    
     MATCH (c:ContratoRAG)-[td:TIENE_DOC]->(d:DocumentoRAG)-[:TIENE_EXTRACTO]->(node)
     WHERE ($doc_tipo IS NULL OR td.tipo_doc = $doc_tipo)
       AND ($expedientes IS NULL OR c.expediente IN $expedientes)
+      
     RETURN
       node.extracto_id               AS extracto_id,
       coalesce(node.tipo,'')         AS tipo,
@@ -176,12 +203,16 @@ def search_extractos(
     )
 
 
+# -----------------------------
+# BÚSQUEDA DE EMPRESAS (Full Text + Exact match)
+# -----------------------------
 
-# -----------------------------
-# Empresa (usa tu TEXT INDEX en e.nombre)
-# -----------------------------
 def search_empresas(query: str, k_empresas: int = 5, max_adjudicaciones: int = 12) -> List[Dict[str, Any]]:
-    """Resuelve empresas por nombre (preferible) y, si aplica, por CIF/NIF."""
+    """
+    Busca empresas por nombre o NIF.
+    Prioriza coincidencias exactas y luego parciales.
+    Devuelve también una lista breve de sus adjudicaciones manuales.
+    """
     q = _clean_q(query)
     if not q:
         return []
@@ -200,6 +231,7 @@ def search_empresas(query: str, k_empresas: int = 5, max_adjudicaciones: int = 1
       )
       OR ($has_cif = true AND (e.nif = $q_upper OR e.nif = $q))
 
+    // Calculamos un ranking de relevancia manual (0 = Mejor match, CIF exacto)
     WITH e,
       CASE
         WHEN $has_cif = true AND (e.nif = $q_upper OR e.nif = $q) THEN 0
@@ -210,11 +242,13 @@ def search_empresas(query: str, k_empresas: int = 5, max_adjudicaciones: int = 1
     ORDER BY match_rank ASC, size(coalesce(e.nombre,'')) ASC
     LIMIT $k_empresas
 
+    // Traemos adjudicaciones para enriquecer el resultado
     OPTIONAL MATCH (e)-[r:ADJUDICATARIA_RAG]->(c:ContratoRAG)
     WITH e, match_rank, r, c,
-         coalesce(r.importe_adjudicado, c.importe_adjudicado, 0) AS importe
+         coalesce(r.importe_adjudicado, 0) AS importe
     ORDER BY match_rank ASC, importe DESC
 
+    // Agregamos todo en una lista dentro del objeto empresa
     WITH
       e,
       match_rank,
@@ -264,7 +298,7 @@ def search_empresas(query: str, k_empresas: int = 5, max_adjudicaciones: int = 1
 
 
 def search_contratos_by_empresa(query: str, k_empresas: int = 3, k_contratos: int = 25) -> List[Dict[str, Any]]:
-    """Lista contratos adjudicados a una empresa (formato compatible con build_context)."""
+    """Devuelve la lista plana de contratos ganados por la empresa (sin agrupar en objeto empresa)."""
     q = _clean_q(query)
     if not q:
         return []
@@ -274,6 +308,7 @@ def search_contratos_by_empresa(query: str, k_empresas: int = 3, k_contratos: in
     has_cif = _looks_like_cif(q_upper)
 
     cypher = """
+    // 1. Encontrar la empresa
     MATCH (e:EmpresaRAG)
     WHERE
       (
@@ -293,9 +328,10 @@ def search_contratos_by_empresa(query: str, k_empresas: int = 3, k_contratos: in
     ORDER BY empresa_match_rank ASC, size(coalesce(e.nombre,'')) ASC
     LIMIT $k_empresas
 
+    // 2. Buscar sus contratos
     MATCH (e)-[r:ADJUDICATARIA_RAG]->(c:ContratoRAG)
     WITH e, r, c, empresa_match_rank,
-         coalesce(r.importe_adjudicado, r.importe, c.importe_adjudicado) AS importe_adj
+         coalesce(r.importe_adjudicado, 0) AS importe_adj
     RETURN
       coalesce(c.expediente, '') AS contract_id,
       coalesce(c.expediente, '') AS expediente,
@@ -327,7 +363,7 @@ def search_contratos_by_empresa(query: str, k_empresas: int = 3, k_contratos: in
 
 
 def empresa_awards_stats(query: str, k_empresas: int = 3) -> Optional[Dict[str, Any]]:
-    """Agregación determinística (sin LLM): cuenta contratos y suma importe adjudicado para la empresa."""
+    """Calcula totales (Count y Suma Importe) para una empresa dada."""
     q = _clean_q(query)
     if not q:
         return None
@@ -359,7 +395,7 @@ def empresa_awards_stats(query: str, k_empresas: int = 3) -> Optional[Dict[str, 
     OPTIONAL MATCH (e)-[r:ADJUDICATARIA_RAG]->(c:ContratoRAG)
     WITH e, match_rank,
          count(DISTINCT c) AS contratos_ganados,
-         sum(coalesce(r.importe_adjudicado, c.importe_adjudicado, 0)) AS importe_total
+         sum(coalesce(r.importe_adjudicado, 0)) AS importe_total
     RETURN
       coalesce(e.nombre,'') AS nombre,
       coalesce(e.nif,'')    AS nif,

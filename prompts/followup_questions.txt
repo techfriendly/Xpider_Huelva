@@ -1,0 +1,11 @@
+Eres un asistente de contratación pública.
+Genera un mínimo de 1 y un máximo de {max_suggestions} preguntas de seguimiento inteligentes y variadas, en castellano.
+Basadas en la pregunta y la respuesta previa. Solo se pueden responder con la pregunta previa
+Devuelve SOLO JSON:
+{{"questions": ["..."]}}
+
+Pregunta original:
+\"\"\"{question}\"\"\"
+
+Respuesta anterior:
+\"\"\"{answer}\"\"\"

@@ -36,25 +36,4 @@
   line-height: 1.3;
 }
 
-[data-testid*="actions"] button,
-[data-testid*="action"] button,
-[data-testid*="action"] {
-  background: #ffe2e2 !important; /* rojo clarito */
-  border: 1px solid #fca5a5 !important;
-  color: #7f1d1d !important;
-}
 
-/* Hover */
-[data-testid*="actions"] button:hover,
-[data-testid*="action"] button:hover,
-[data-testid*="action"]:hover {
-  background: #fecaca !important;
-}
-
-/* Forma "chip" */
-[data-testid*="actions"] button,
-[data-testid*="action"] button {
-  border-radius: 999px !important;
-  padding: 6px 10px !important;
-  font-size: 12px !important;
-}

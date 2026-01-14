@@ -1,9 +1,15 @@
-"""Generación y ejecución de consultas Cypher seguras (solo lectura).
-
-Mejoras:
-- El "redactor" del resultado NO debe devolver JSON.
-- Fallback determinista: si el redactor devuelve JSON, se devuelve una tabla Markdown con los rows.
 """
+GENERADOR DE CONSULTAS CYPHER: cypher.py
+DESCRIPCIÓN:
+Convierte lenguaje natural ("¿Quién ganó más contratos?") en código Cypher (SQL para grafos)
+usando el LLM.
+
+SEGURIDAD:
+- Comprueba que la consulta es SOLO LECTURA (prohíbe CREATE, DELETE, etc.).
+- Comprueba errores comunes y reintenta repararlos automáticamente.
+- Si falla, hace fallback a una tabla genérica.
+"""
+
 import json
 import re
 from typing import Any, Dict, List, Optional, Union
@@ -12,8 +18,10 @@ import config
 from clients import llm_client
 from services.neo4j_queries import neo4j_query
 from chat_utils.json_utils import safe_json_loads
+from chat_utils.prompt_loader import load_prompt
 
 
+# Palabras prohibidas para evitar inyección de código que modifique la BD
 WRITE_KEYWORDS = re.compile(
     r"\b(CREATE|MERGE|SET|DELETE|DETACH|DROP|LOAD\s+CSV|CALL\s+apoc\.|CALL\s+dbms)\b",
     re.IGNORECASE,
@@ -21,30 +29,33 @@ WRITE_KEYWORDS = re.compile(
 
 
 def cypher_is_safe_readonly(cypher: str) -> bool:
+    """Valida si la consulta parece segura (solo lectura)."""
     if not cypher or not isinstance(cypher, str):
         return False
     if WRITE_KEYWORDS.search(cypher):
         return False
-    # Permitimos MATCH / CALL (p.ej. CALL db.index...); bloqueamos lo demás con WRITE_KEYWORDS
+    # Debe contener al menos una cláusula de consulta básica
     if not re.search(r"\b(MATCH|CALL|WITH|RETURN)\b", cypher, re.IGNORECASE):
         return False
     return True
 
 
 def cypher_ensure_limit(cypher: str, default_limit: int = 50) -> str:
+    """Añade un LIMIT por seguridad si no existe, para no traerse toda la BD."""
     if re.search(r"\bLIMIT\b", cypher, re.IGNORECASE):
         return cypher
     return cypher.rstrip() + f"\nLIMIT {default_limit}"
 
 
 def cypher_needs_r_binding(cypher: str) -> bool:
-    """Detecta si la query usa r.<prop> pero no declara [r:REL]."""
+    """Detecta un error común: usar propiedades de una relación (r.prop) sin declararla [r:REL]."""
     if re.search(r"\br\.\w+", cypher):
         return not bool(re.search(r"\[\s*r\s*:", cypher))
     return False
 
 
 def get_schema_hint(max_chars: int = 7000) -> str:
+    """Obtiene el esquema visual de la BD para dárselo al LLM como pista."""
     try:
         rows = neo4j_query("CALL db.schema.visualization()")
         if rows:
@@ -55,12 +66,13 @@ def get_schema_hint(max_chars: int = 7000) -> str:
 
 
 def _wants_raw_json(question: str) -> bool:
+    """Detecta si el usuario 'experto' quiere ver el JSON crudo."""
     q = (question or "").lower()
-    # si el usuario pide explícitamente json, respetamos
     return any(tok in q for tok in [" json", "en json", "formato json", "devuélveme json", "devuelveme json", "raw json"])
 
 
 def _format_number_es(x: Union[int, float], decimals: int = 2) -> str:
+    """Formatea números al estilo español (1.000,00)."""
     # 5,036,383.02 -> 5.036.383,02
     s = f"{x:,.{decimals}f}"
     s = s.replace(",", "X").replace(".", ",").replace("X", ".")
@@ -68,39 +80,36 @@ def _format_number_es(x: Union[int, float], decimals: int = 2) -> str:
 
 
 def _format_value(key: str, v: Any) -> str:
+    """Formatea valores individuales para mostrarlos bonitos en la tabla Markdown."""
     if v is None:
         return "—"
 
-    # Boolean
     if isinstance(v, bool):
         return "sí" if v else "no"
 
-    # Numéricos
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         k = (key or "").lower()
+        # Detección heurística de campos monetarios
         is_money = any(t in k for t in ["importe", "total", "factur", "presupuesto", "valor", "eu", "€"])
-        # Evita floats feos como 5036383.02000000005
         if isinstance(v, float):
             v = round(v, 2)
         if is_money:
             return f"{_format_number_es(float(v), 2)} €"
-        # Enteros “bonitos” si aplica
         if float(v).is_integer():
             return _format_number_es(float(v), 0)
         return _format_number_es(float(v), 2)
 
-    # Strings
     if isinstance(v, str):
         s = v.strip()
         if not s:
             return "—"
-        # compacta un poco
         s = re.sub(r"\s{2,}", " ", s)
+        # Recortar textos muy largos en celdas de tabla
         if len(s) > 140:
             s = s[:139].rstrip() + "…"
-        return s.replace("|", r"\|")
+        return s.replace("|", r"\|") # Escapar pipes para Markdown
 
-    # Dict/list anidado
+    # Objetos complejos -> JSON string
     try:
         s = json.dumps(v, ensure_ascii=False)
     except Exception:
@@ -111,7 +120,7 @@ def _format_value(key: str, v: Any) -> str:
 
 
 def rows_to_markdown(rows: Any, max_rows: int = 25, max_cols: int = 8) -> str:
-    """Convierte rows de Neo4j (list[dict]) a una tabla Markdown usable en chat."""
+    """Convierte resultados de la BD (Lista de diccionarios) en una Tabla Markdown."""
     if rows is None:
         return "No se han devuelto filas."
 
@@ -119,16 +128,15 @@ def rows_to_markdown(rows: Any, max_rows: int = 25, max_cols: int = 8) -> str:
         if not rows:
             return "No se han encontrado resultados."
 
-        # list[dict] -> tabla
         if all(isinstance(r, dict) for r in rows):
-            # Columnas: primero las de la primera fila, luego añadimos nuevas si aparecen
+            # Recopilar todas las columnas posibles
             cols: List[str] = list(rows[0].keys())
             for r in rows[1:]:
                 for k in r.keys():
                     if k not in cols:
                         cols.append(k)
 
-            cols = cols[:max_cols]
+            cols = cols[:max_cols] # Limitar ancho
 
             header = "| " + " | ".join(cols) + " |"
             sep = "| " + " | ".join(["---"] * len(cols)) + " |"
@@ -143,7 +151,7 @@ def rows_to_markdown(rows: Any, max_rows: int = 25, max_cols: int = 8) -> str:
 
             return "\n".join(lines)
 
-        # list de escalares
+        # Si es una lista simple (ej: lista de nombres)
         lines = ["Resultados:"]
         for x in rows[:max_rows]:
             lines.append(f"- {_format_value('', x)}")
@@ -151,7 +159,6 @@ def rows_to_markdown(rows: Any, max_rows: int = 25, max_cols: int = 8) -> str:
             lines.append(f"\n_Mostrando {max_rows} de {len(rows)} elementos._")
         return "\n".join(lines)
 
-    # dict -> pretty json
     if isinstance(rows, dict):
         return "```json\n" + json.dumps(rows, ensure_ascii=False, indent=2) + "\n```"
 
@@ -159,36 +166,14 @@ def rows_to_markdown(rows: Any, max_rows: int = 25, max_cols: int = 8) -> str:
 
 
 def generate_cypher_plan(question: str, schema_hint: str, error_hint: str = "") -> Dict[str, Any]:
-    prompt = f"""
-Fecha actual: {config.TODAY_STR}
-
-Eres un experto en Neo4j y contratación pública.
-Genera una consulta Cypher SOLO LECTURA para responder a la pregunta.
-
-Esquema (puede estar truncado):
-\"\"\"{schema_hint}\"\"\"
-
-REGLAS IMPORTANTES:
-- Evita APOC.
-- Evita CREATE/MERGE/SET/DELETE/DROP.
-- Limita resultados con LIMIT.
-- Si usas propiedades de la relación de adjudicación (r.importe_adjudicado o r.importe),
-  DEBES declarar la relación con variable r, por ejemplo:
-  (emp:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(c:ContratoRAG)
-
-- Usa aliases claros en el RETURN (ej: nombre, total_facturado, contratos_ganados, importe_total).
-
-{("Error previo a corregir: " + error_hint) if error_hint else ""}
-
-Devuelve SOLO JSON:
-{{
-  "cypher": "...",
-  "params": {{}}
-}}
-
-Pregunta:
-\"\"\"{question}\"\"\"
-"""
+    """Genera el plan (Query + Parámetros) usando el LLM."""
+    prompt = load_prompt(
+        "cypher_generation",
+        today=config.TODAY_STR,
+        schema_hint=schema_hint,
+        error_hint=("Error previo a corregir: " + error_hint) if error_hint else "",
+        question=question
+    )
     resp = llm_client.chat.completions.create(
         model=config.LLM_MODEL,
         messages=[{"role": "system", "content": "Devuelve SOLO JSON válido."}, {"role": "user", "content": prompt}],
@@ -196,7 +181,10 @@ Pregunta:
         max_tokens=650,
     )
 
-    data = safe_json_loads(resp.choices[0].message.content or "") or {}
+    content = resp.choices[0].message.content or ""
+    print(f"--- [GEN CYPHER] Respuesta LLM: {content[:100]}... ---")
+
+    data = safe_json_loads(content) or {}
     cypher = (data.get("cypher") or "").strip()
     params = data.get("params") or {}
     if not isinstance(params, dict):
@@ -206,29 +194,42 @@ Pregunta:
 
 
 def cypher_qa(question: str) -> Dict[str, Any]:
+    """
+    Función principal:
+    1. Genera Cypher.
+    2. Valida seguridad.
+    3. Ejecuta.
+    4. Si falla, intenta corregir (hasta 2 intentos).
+    5. Formatea la respuesta (Tabla Markdown o Texto explicativo).
+    """
     schema_hint = get_schema_hint(7000)
-
+    
     plan = generate_cypher_plan(question, schema_hint)
     cypher = plan["cypher"]
     params = plan["params"]
 
+    # Validación 1: Seguridad
     if not cypher_is_safe_readonly(cypher):
+        print(f"--- [ERROR CYPHER] Cypher no seguro: {cypher!r} ---")
         return {"error": "Cypher no seguro o inválido.", "cypher": cypher, "plan": plan}
 
+    # Validación 2: Sintaxis común incorrecta
     if cypher_needs_r_binding(cypher):
         plan = generate_cypher_plan(question, schema_hint, error_hint="La query usa r.<prop> pero no declara [r:REL].")
         cypher = plan["cypher"]
         params = plan["params"]
-        if not cypher_is_safe_readonly(cypher):
-            return {"error": "Cypher no seguro tras reparación.", "cypher": cypher, "plan": plan}
 
     cypher = cypher_ensure_limit(cypher, 50)
 
-    # Ejecuta, con una reparación si falla
+    # EJECUCIÓN CON REINTENTOS
     try:
+        print(f"--- [EXEC CYPHER] Ejecutando: {cypher} | Params: {params} ---")
         rows = neo4j_query(cypher, params)
+        print(f"--- [EXEC CYPHER] Filas: {len(rows) if rows else 0} ---")
     except Exception as e:
         err = str(e)
+        print(f"--- [ERROR CYPHER EXEC] {err} ---")
+        # Reintento con pista del error
         plan2 = generate_cypher_plan(question, schema_hint, error_hint=err)
         cypher2 = plan2["cypher"]
         params2 = plan2["params"]
@@ -236,49 +237,34 @@ def cypher_qa(question: str) -> Dict[str, Any]:
         if not cypher_is_safe_readonly(cypher2):
             return {"error": f"Fallo Cypher y reparación insegura: {err}", "cypher": cypher, "plan": plan2}
 
-        if cypher_needs_r_binding(cypher2):
-            plan3 = generate_cypher_plan(
-                question,
-                schema_hint,
-                error_hint="Define la relación con variable r si usas r.<prop>.",
-            )
-            cypher2 = plan3["cypher"]
-            params2 = plan3["params"]
-            if not cypher_is_safe_readonly(cypher2):
-                return {"error": "No se pudo generar Cypher seguro tras 2 reparaciones.", "cypher": cypher, "plan": plan3}
-
         cypher2 = cypher_ensure_limit(cypher2, 50)
-        rows = neo4j_query(cypher2, params2)
-        cypher = cypher2
-        params = params2
-        plan = plan2
+        try:
+            print(f"--- [REINTENTO CYPHER] Ejecutando: {cypher2} ---")
+            rows = neo4j_query(cypher2, params2)
+            cypher = cypher2         # Actualizamos variables para devolver la query correcta
+            params = params2
+            plan = plan2
+        except Exception as e2:
+             return {"error": f"Fallo tras re-intento: {str(e2)}", "cypher": cypher2, "plan": plan2}
 
-    # Si el usuario quiere JSON explícito, se devuelve JSON directamente (sin LLM)
+    # DEVOLUCIÓN DE RESPUESTA
+    
+    # Si piden JSON, devolvemos JSON
     if _wants_raw_json(question):
         answer = json.dumps(rows, ensure_ascii=False, indent=2)
         return {"answer": answer, "cypher": cypher, "rows": rows, "plan": plan}
 
-    # Intentamos redacción en texto. Si “se cuela” JSON, fallback a tabla.
+    # Generamos tabla Markdown
     table_md = rows_to_markdown(rows, max_rows=25)
 
-    system_msg = (
-        "Eres un asistente de contratación pública.\n"
-        "Tu respuesta debe ser TEXTO en español (Markdown).\n"
-        "NO devuelvas JSON, ni arrays/dicts literales, ni bloques ```json.\n"
-        "Si hay varias filas, muestra una lista numerada o una tabla Markdown.\n"
-        "Si no hay datos, dilo claramente."
+    # Intentamos que el LLM explique los resultados en lenguaje natural
+    system_msg = load_prompt("cypher_response_system")
+    user_msg = load_prompt(
+        "cypher_response_user",
+        question=question,
+        cypher=cypher,
+        rows_json=json.dumps(rows, ensure_ascii=False)
     )
-
-    user_msg = f"""
-Pregunta:
-\"\"\"{question}\"\"\"
-
-Cypher ejecutado:
-\"\"\"{cypher}\"\"\"
-
-Filas devueltas (JSON, para tu análisis interno):
-\"\"\"{json.dumps(rows, ensure_ascii=False)}\"\"\"
-"""
 
     resp = llm_client.chat.completions.create(
         model=config.LLM_MODEL,
@@ -291,7 +277,7 @@ Filas devueltas (JSON, para tu análisis interno):
     if not answer:
         answer = table_md
 
-    # Fallback: si el LLM devuelve JSON o un bloque json, lo sustituimos por tabla.
+    # Fallback: Si el LLM devuelve JSON en vez de explicarlo, mostramos la tabla que se entiende mejor.
     looks_like_json = False
     if answer.startswith("[") or answer.startswith("{"):
         parsed = safe_json_loads(answer)

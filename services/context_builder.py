@@ -1,21 +1,29 @@
-"""Construcción del contexto RAG a partir de contratos, capítulos y extractos."""
-from typing import List
+"""
+CONSTRUCTOR DE CONTEXTO: context_builder.py
+DESCRIPCIÓN:
+Crea el texto ("Contexto") que el LLM leerá antes de responder.
+Recibe listas de datos crudos (contratos, capítulos) y los formatea con viñetas,
+cortando textos demasiado largos para que quepan en la "ventana de memoria" del modelo.
+"""
 
+from typing import List
 import config
 from chat_utils.text_utils import clip, enforce_budget
 
-
 def build_context(question: str, contratos, capitulos, extractos) -> str:
+    """Combina todas las evidencias encontradas en un solo string formateado."""
     parts: List[str] = []
     parts.append("=== PREGUNTA DEL USUARIO ===")
     parts.append(question.strip())
 
+    # Bloque de Contratos
     if contratos:
         parts.append("\n=== CONTRATOS RELEVANTES ===")
         for c in contratos:
             snippet = clip(c.get("abstract", "") or "", 1000)
             link = (c.get("link_contrato") or "").strip()
             link_line = f"  Enlace: {link}\n" if link else ""
+            
             parts.append(
                 f"- Expediente: {c.get('expediente') or 'N/D'} | Estado: {c.get('estado') or 'N/D'}\n"
                 f"  Título: {c.get('titulo') or 'N/D'}\n"
@@ -28,6 +36,7 @@ def build_context(question: str, contratos, capitulos, extractos) -> str:
                 f"  Resumen: {snippet}"
             )
 
+    # Bloque de Capítulos (Texto de Pliegos)
     if capitulos:
         parts.append("\n=== CAPÍTULOS RELEVANTES ===")
         for cap in capitulos:
@@ -38,6 +47,7 @@ def build_context(question: str, contratos, capitulos, extractos) -> str:
                 f"  Texto: {snippet}"
             )
 
+    # Bloque de Extractos (Fragmentos específicos clasificados)
     if extractos:
         parts.append("\n=== EXTRACTOS RELEVANTES ===")
         for ex in extractos:
@@ -48,6 +58,7 @@ def build_context(question: str, contratos, capitulos, extractos) -> str:
                 f"  Texto: {snippet}"
             )
 
+    # Instrucciones finales al final del contexto para reforzar el comportamiento
     parts.append(
         "\n=== INSTRUCCIONES PARA EL MODELO ===\n"
         "Responde basándote EXCLUSIVAMENTE en el contexto anterior.\n"
@@ -59,4 +70,5 @@ def build_context(question: str, contratos, capitulos, extractos) -> str:
     )
 
     ctx = "\n".join(parts)
+    # Recorte final de seguridad para no pasarnos de tokens
     return enforce_budget(ctx, config.RAG_CONTEXT_MAX_CHARS)

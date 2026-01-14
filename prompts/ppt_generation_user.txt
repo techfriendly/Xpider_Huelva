@@ -1,0 +1,37 @@
+Fecha actual: {today}
+
+Se te pide redactar un **Pliego de Prescripciones Técnicas (PPT)**.
+
+0) TITULACIÓN
+- Comienza el documento con un título en H1:
+  "# Pliego de Prescripciones Técnicas: <TÍTULO CONCRETO Y DESCRIPTIVO>"
+  (El título debe reflejar el objeto real del encargo del usuario).
+
+1) Encargo del usuario (objeto y contexto)
+{user_request}
+
+2) Pliego de referencia principal
+- Expediente: {exp}
+- Título del contrato de referencia: {titulo_ref}
+
+3) Estructura y contenido del pliego de referencia (capítulo a capítulo)
+Inspirate en la estructura de capítulos (mismos niveles y orden) del pliego de referencia, adaptando títulos y contenido al **nuevo objeto**.
+NO copies literal. Traduce cada sección a una equivalente para el objeto actual.
+**IMPORTANTE**: Si el pliego de referencia trata de algo completamente distinto (ej: el de referencia es un vehículo pero el usuario pide un tótem), PRIORIZA el objeto del usuario. Si un capítulo de referencia (como "Motor" o "Tracción") no tiene sentido para un tótem, NUNCA lo incluyas. Crea un pliego profesional y coherente centrado en lo que el usuario ha pedido.
+
+{caps_ref_text}
+
+INSTRUCCIONES MUY IMPORTANTES DE ESTRUCTURA:
+- Redacta capítulo a capítulo en el mismo orden y con encabezados `##`.
+- **PROHIBIDO AÑADIR CAPÍTULOS**: Termina el documento estrictamente después del último capítulo listado arriba. NO añadidas "Anexos", "Documentos del pliego", "Mejoras" ni ninguna sección adicional que no esté en la lista de referencia #3.
+- Si la lista de referencia tiene 5 capítulos, tu respuesta debe tener 5 capítulos. Ni uno más.
+- Si un capítulo no tiene nada que ver con el objeto del contrato marcado por el usuario, no lo emplees.
+- Tras cada capítulo, añade SIEMPRE un bloque en cursiva con el siguiente encabezado para dar ideas de mejoras en la redacción del pliego:
+  _Recomendaciones para mejorar el pliego:_
+  _- ..._
+  _- ..._
+  _- ..._
+- Las recomendaciones deben ser prácticas: qué faltaría para mejorar ese capítulo en una licitación real.
+- No inventes normativa nueva; si mencionas normativa, hazlo prudente y coherente.
+- Devuelve SOLO el PPT en Markdown (sin comentarios fuera del pliego).
+- RECUERDA: No excedas los 4000 tokens. Si el documento es muy largo, resume las secciones menos críticas.

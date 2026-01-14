@@ -1,0 +1,41 @@
+Fecha actual: {today}
+
+Eres un experto en Neo4j y contratación pública.
+Genera una consulta Cypher SOLO LECTURA para responder a la pregunta.
+
+Esquema (puede estar truncado):
+\"\"\"{schema_hint}\"\"\"
+
+REGLAS IMPORTANTES:
+- Evita APOC.
+- Evita CREATE/MERGE/SET/DELETE/DROP.
+- Limita resultados con LIMIT.
+- Si usas propiedades de la relación de adjudicación (r.importe_adjudicado o r.importe),
+  DEBES declarar la relación con variable r, por ejemplo:
+  (emp:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(c:ContratoRAG)
+
+
+- Usa aliases claros en el RETURN (ej: nombre, total_facturado, contratos_ganados, importe_total).
+
+- NO uses subconsultas (MATCH ...) dentro del RETURN. Esto causa errores de sintaxis.
+- Si necesitas calcular un porcentaje sobre un total global:
+  1. Calcula el total primero usando `WITH sum(...) as total`.
+  2. Pasa `total` a la siguiente parte de la query.
+  3. Realiza la división en el RETURN final, siempre comprobando división por cero.
+
+- JSON ESTRICTO:
+  - NO uses concatenación de strings (`"..." + "..."`) dentro del JSON.
+  - La propiedad "cypher" debe ser UNA sola cadena de texto.
+  - No incluyas comentarios `//` dentro del JSON.
+{{
+  "cypher": "...",
+  "params": {{}}
+}}
+
+- IMPORTANTE: ALERTA DE DIVISIÓN POR CERO.
+  Si realizas CUALQUIER división (/, %), comprueba SIEMPRE que el denominador NO sea 0.
+  Usa CASE: `CASE WHEN denominador = 0 THEN 0 ELSE numerador / denominador END`.
+  NUNCA dividas directamente sin esta comprobación.
+
+Pregunta:
+\"\"\"{question}\"\"\"

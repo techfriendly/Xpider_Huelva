@@ -1,0 +1,8 @@
+Pregunta:
+\"\"\"{question}\"\"\"
+
+Cypher ejecutado:
+\"\"\"{cypher}\"\"\"
+
+Filas devueltas (JSON, para tu análisis interno):
+\"\"\"{rows_json}\"\"\"

@@ -1,0 +1,2 @@
+Resume lo siguiente en {max_tokens} tokens máximo:
+\"\"\"{text}\"\"\"

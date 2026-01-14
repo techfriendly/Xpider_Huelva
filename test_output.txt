@@ -1,0 +1,23 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-8.3.5, pluggy-1.5.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/gonzalo/Documentos/DESARROLLO/Chatbot Huelva
+plugins: typeguard-4.4.2, anyio-4.10.0, time-machine-2.15.0, langsmith-0.4.40, asyncio-0.21.1
+asyncio: mode=strict
+collecting ... collected 3 items
+
+tests/test_graph.py::test_graph_router_greeting 
+DEBUG FINAL STATE: {'question': 'Hola', 'history': [{'role': 'user', 'content': 'Hola'}, {'role': 'assistant', 'content': 'Hola. Dime qué necesitas buscar.\n\nEjemplos:\n- "¿Qué contratos ha ganado Techfriendly?"\n- "¿Me haces un pliego de prescripciones técnicas para el Suministro de un vehículo 4x4 para el servicio forestal?"\n- "Top 10 adjudicatarias por importe adjudicado"'}], 'router_state': {}, 'intent': {'intent': 'GREETING', 'doc_tipo': None, 'extracto_tipos': None, 'needs_aggregation': False, 'is_greeting': True, 'is_followup': False, 'focus': 'GENERAL', 'empresa_query': None, 'empresa_nif': None}, 'answer_prompt': None, 'ppt_generation_input': None, 'answer': 'Hola. Dime qué necesitas buscar.\n\nEjemplos:\n- "¿Qué contratos ha ganado Techfriendly?"\n- "¿Me haces un pliego de prescripciones técnicas para el Suministro de un vehículo 4x4 para el servicio forestal?"\n- "Top 10 adjudicatarias por importe adjudicado"', 'thinking_message_id': 'test_id', 'sidebar_title': None, 'sidebar_md': None, 'sidebar_props': None, 'follow_ups': [], 'element_to_send': None, 'error': None}
+PASSED
+tests/test_graph.py::test_graph_router_unknown PASSED
+tests/test_graph.py::test_graph_entity_switch 
+DEBUG res_1 intent: {'intent': 'RAG_QA', 'doc_tipo': None, 'extracto_tipos': None, 'needs_aggregation': False, 'is_greeting': False, 'is_followup': False, 'focus': 'EMPRESA', 'empresa_query': 'Techfriendly', 'empresa_nif': None}
+PASSED
+
+=============================== warnings summary ===============================
+../../../.local/lib/python3.10/site-packages/traceloop/sdk/prompts/model.py:12
+  /home/gonzalo/.local/lib/python3.10/site-packages/traceloop/sdk/prompts/model.py:12: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class RegistryObjectBaseModel(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+========================= 3 passed, 1 warning in 5.56s =========================

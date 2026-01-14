@@ -1,26 +1,27 @@
-"""Construcción de markdown y panel lateral de evidencias (Chainlit) sin JSX.
-
-Este módulo evita CustomElement (JSX) y usa cl.Text para mostrar evidencias
-directamente en el sidebar (ElementSidebar).
 """
+GESTOR DE EVIDENCIAS (SIDEBAR): ui/evidence.py
+DESCRIPCIÓN:
+Controla la barra lateral derecha de la interfaz (Chainlit).
+Muestra las "Pruébas" o documentos que el bot ha usado para responder (Contratos, Capítulos, etc.).
+No usa React/JSX complejo, solo componentes nativos de Chainlit (cl.Text, cl.ElementSidebar).
+"""
+
 import json
 import textwrap
 from typing import Any, Dict, List, Optional
-
 import chainlit as cl
 
+# --- HELPERS ---
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def _escape_fence(text: str) -> str:
-    """Evita romper bloques ``` en markdown si el contenido incluye ```."""
+    """Evita que un texto rompa el formato Markdown si contiene bloques de código."""
     if not text:
         return ""
     return text.replace("```", "``\u200b`")
 
 
 def _truncate(text: str, max_chars: int) -> str:
+    """Recorta textos largos para que no ocupen toda la pantalla."""
     if not text:
         return ""
     if len(text) <= max_chars:
@@ -29,6 +30,7 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 def _json_dumps(obj: Any, max_chars: int = 12000) -> str:
+    """Convierte objeto a JSON string con límite de tamaño."""
     try:
         s = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
     except Exception:
@@ -37,7 +39,9 @@ def _json_dumps(obj: Any, max_chars: int = 12000) -> str:
 
 
 def _build_meta_markdown(props_extra: Optional[Dict[str, Any]]) -> str:
-    """Convierte props_extra (mode/filters/counts/tokens) en un bloque markdown."""
+    """
+    Crea un bloque de texto resumen con metadatos (ej: cuántos contratos se han encontrado, modo de búsqueda...).
+    """
     if not props_extra or not isinstance(props_extra, dict):
         return ""
 
@@ -53,21 +57,14 @@ def _build_meta_markdown(props_extra: Optional[Dict[str, Any]]) -> str:
         for k, v in filters.items():
             if v is None or v == "" or v == []:
                 continue
-            if isinstance(v, list):
-                v_str = ", ".join([str(x) for x in v])
-            else:
-                v_str = str(v)
+            v_str = ", ".join([str(x) for x in v]) if isinstance(v, list) else str(v)
             f_parts.append(f"{k}={v_str}")
         if f_parts:
             lines.append(f"**Filtros:** {', '.join(f_parts)}")
 
     counts = props_extra.get("counts")
     if isinstance(counts, dict) and counts:
-        c_parts = []
-        for k, v in counts.items():
-            if v is None:
-                continue
-            c_parts.append(f"{k}={v}")
+        c_parts = [f"{k}={v}" for k, v in counts.items() if v is not None]
         if c_parts:
             lines.append(f"**Conteos:** {', '.join(c_parts)}")
 
@@ -81,10 +78,10 @@ def _build_meta_markdown(props_extra: Optional[Dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
-# -----------------------------
-# Evidencias RAG
-# -----------------------------
+# --- CONSTRUCTORES DE MARKDOWN ---
+
 def build_evidence_markdown(contratos, capitulos, extractos) -> str:
+    """Genera el texto Markdown principal con la lista de documentos encontrados (RAG)."""
     lines: List[str] = []
     lines.append("### Evidencias utilizadas")
 
@@ -122,9 +119,6 @@ def build_evidence_markdown(contratos, capitulos, extractos) -> str:
     return "\n".join(lines)
 
 
-# -----------------------------
-# Evidencias Cypher / Neo4j
-# -----------------------------
 def build_cypher_evidence_markdown(
     question: str,
     cypher: str,
@@ -134,6 +128,7 @@ def build_cypher_evidence_markdown(
     max_rows: int = 25,
     max_json_chars: int = 12000,
 ) -> str:
+    """Genera el texto Markdown para cuando hacemos una consulta a Base de Datos (Cypher)."""
     if rows is None:
         rows_list: List[Any] = []
     elif isinstance(rows, list):
@@ -145,84 +140,75 @@ def build_cypher_evidence_markdown(
     lines.append("### Evidencias (Neo4j / Cypher)")
 
     if question:
-        lines.append("")
-        lines.append("**Pregunta**")
-        lines.append(_escape_fence(question.strip()))
+        lines.append(f"\n**Pregunta**\n{_escape_fence(question.strip())}")
 
     if error:
-        lines.append("")
-        lines.append("**Error**")
-        lines.append(_escape_fence(str(error)))
+        lines.append(f"\n**Error**\n{_escape_fence(str(error))}")
 
-    lines.append("")
-    lines.append("**Cypher ejecutado**")
-    lines.append("```cypher")
-    lines.append(_escape_fence((cypher or "").strip()))
-    lines.append("```")
+    lines.append(f"\n**Cypher ejecutado**\n```cypher\n{_escape_fence((cypher or '').strip())}\n```")
 
     if params:
-        lines.append("")
-        lines.append("**Parámetros**")
-        lines.append("```json")
-        lines.append(_escape_fence(_json_dumps(params, max_chars=max_json_chars)))
-        lines.append("```")
+        lines.append(f"\n**Parámetros**\n```json\n{_escape_fence(_json_dumps(params, max_chars=max_json_chars))}\n```")
 
     n_total = len(rows_list)
     n_show = min(max_rows, n_total)
     preview = rows_list[:max_rows]
 
-    lines.append("")
-    lines.append(f"**Resultado** (preview: {n_show} filas de {n_total})")
-    lines.append("```json")
-    lines.append(_escape_fence(_json_dumps(preview, max_chars=max_json_chars)))
-    lines.append("```")
+    lines.append(f"\n**Resultado** (preview: {n_show} filas de {n_total})\n```json\n{_escape_fence(_json_dumps(preview, max_chars=max_json_chars))}\n```")
 
     return "\n".join(lines)
 
 
-# -----------------------------
-# Sidebar (sin JSX)
-# -----------------------------
+# --- FUNCIÓN PRINCIPAL DE CONTROL DEL SIDEBAR ---
+
 async def set_evidence_sidebar(
     title: str,
     markdown: str,
     props_extra: Optional[Dict[str, Any]] = None,
     context_text: Optional[str] = None,
 ):
-    """Abre/actualiza el sidebar derecho con cl.Text (sin CustomElement).
-
-    - Primer elemento: meta (mode/filters/counts/tokens) si existe
-    - Segundo: evidencias (markdown)
-    - Tercero (opcional): contexto enviado al LLM (como bloque ```text)
+    """
+    Despliega la barra lateral derecha con la información proporcionada.
+    
+    Args:
+        title: Título de la barra (ej: "Evidencias RAG").
+        markdown: Contenido principal formateado.
+        props_extra: Datos técnicos extra (tokens, filtros).
+        context_text: El texto completo crudo que se envió al LLM (para depurar).
     """
     meta_md = _build_meta_markdown(props_extra)
 
     elements: List[Any] = []
 
+    # 1. Metadatos (arriba del todo)
     if meta_md:
         elements.append(cl.Text(name="evidence_meta", content=meta_md))
 
+    # 2. Contenido Principal
     elements.append(cl.Text(name="evidence_markdown", content=markdown or "No hay evidencias para mostrar."))
 
+    # 3. Contexto RAW (Opcional, útil para depuración)
     if context_text:
         ctx = _escape_fence(_truncate(context_text, 20000))
         ctx_md = "### Contexto enviado al modelo\n\n```text\n" + ctx + "\n```"
         elements.append(cl.Text(name="evidence_context", content=ctx_md))
 
+    # Intentamos abrir el sidebar
     try:
-        # Nota: según docs, set_elements abre el sidebar; set_title actualiza el título.
         await cl.ElementSidebar.set_elements(elements)
         await cl.ElementSidebar.set_title(title)
+        
+    # Fallback: Si falla (versiones nuevas/viejas de Chainlit a veces cambian API), lo enviamos al chat.
     except Exception as exc:
-        # Fallback: si el sidebar no está disponible, mostramos en chat (sin romper UX).
         print(f"[WARN] No se pudo abrir el sidebar de evidencias: {exc}")
         try:
             await cl.Message(content=title or "Evidencias", elements=elements).send()
         except Exception as exc_inline:
-            print(f"[ERROR] Tampoco pude adjuntar evidencias en el mensaje: {exc_inline}")
+             print(f"[ERROR] Tampoco pude adjuntar evidencias en el mensaje: {exc_inline}")
 
 
 async def clear_evidence_sidebar():
+    """Cierra/limpia la barra lateral."""
     try:
         await cl.ElementSidebar.set_elements([])
     except Exception:

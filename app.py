@@ -1,217 +1,130 @@
-import re
-from typing import Any, Dict, List, Optional
+"""
+ARCHIVO PRINCIPAL: app.py
+DESCRIPCIÓN:
+Este es el punto de entrada de la aplicación Chatbot. Aquí se configuran:
+1. La conexión con Chainlit (la interfaz visual del chat).
+2. La base de datos para guardar el historial de conversaciones.
+3. El sistema de autenticación (login con usuario y contraseña).
+4. Las funciones que reaccionan cuando el usuario entra, escribe o pulsa botones.
+"""
 
 import chainlit as cl
-
 import config
-from clients import llm_client
-from services.context_builder import build_context
-from services.cypher import cypher_qa
-from services.embeddings import embed_text
-from services.followups import (
-    generate_follow_up_questions,
-    should_generate_followups,
-    summarize_for_memory,
-)
-from services.intent_router import detect_intent
-from services.neo4j_queries import (
-    empresa_awards_stats,
-    search_capitulos,
-    search_contratos,
-    search_contratos_by_empresa,
-    search_empresas,
-    search_extractos,
-)
-from services.ppt_generation import (
-    HAS_DOCX,
-    build_ppt_generation_prompt_one_by_one,
-    find_reference_ppt_contract,
-    get_ppt_reference_data,
-    plan_ppt_clarifications,
-    ppt_to_docx_bytes,
-    slug_filename,
-)
-from ui.evidence import build_evidence_markdown, clear_evidence_sidebar, set_evidence_sidebar
-from chat_utils.text_utils import context_token_report, estimate_tokens, trim_history_to_fit
+from services.orchestrator import orchestrate_message
+from ui.evidence import clear_evidence_sidebar
+from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+import json
+import os
+from typing import Union, Dict, Any
+from chainlit.data.storage_clients.base import BaseStorageClient
 
+# --- SECCIÓN 1: CONFIGURACIÓN DE PERSISTENCIA (GUARDADO DEL CHAT) ---
+# Configuramos cómo y dónde se guarda el historial de las conversaciones.
 
-def _empresa_lookup(intent: Dict[str, Any], router_state: Dict[str, Any]) -> Optional[str]:
-    lookup = (intent.get("empresa_query") or intent.get("empresa_nif") or "").strip()
-    if lookup:
-        return lookup
-    if intent.get("is_followup") and router_state.get("last_empresa_query"):
-        return str(router_state.get("last_empresa_query"))
+# Cliente de almacenamiento "falso" (Dummy) porque guardamos el texto en base de datos local (SQLite),
+# no archivos en la nube (S3, Azure, etc.).
+class DummyStorageClient(BaseStorageClient):
+    async def upload_file(self, object_key: str, data: Union[bytes, str], mime: str = "application/octet-stream", overwrite: bool = True) -> Dict[str, Any]:
+        return {"object_key": object_key, "url": ""}
+    async def get_read_url(self, object_key: str) -> str:
+        return ""
+    async def delete_file(self, object_key: str) -> bool:
+        return True
+    async def close(self):
+        pass
+
+# Clase extendida de la Capa de Datos para añadir diagnósticos (Logs).
+# Esto nos permite ver en la terminal si algo falla al guardar o leer el historial.
+class DebugSQLAlchemyDataLayer(SQLAlchemyDataLayer):
+    # Función para crear un "paso" (mensaje) nuevo
+    async def create_step(self, step_dict):
+        # Descomentar para ver cada mensaje que se guarda:
+        # print(f"--- [DEBUG] Guardando paso: {step_dict.get('name')} ({step_dict.get('type')}) ---")
+        try:
+            return await super().create_step(step_dict)
+        except Exception as e:
+            print(f"--- [ERROR DEBUG] Fallo al guardar paso: {e} ---")
+            raise e
+
+    # Función para recuperar todos los hilos (conversaciones) de un usuario
+    async def get_all_user_threads(self, user_id: str):
+        # Descomentar para ver cuándo se pide el historial:
+        # print(f"--- [DEBUG] Recuperando hilos para usuario: {user_id} ---")
+        threads = await super().get_all_user_threads(user_id)
+        # if threads:
+        #     print(f"--- [DEBUG] Encontrados {len(threads)} hilos ---")
+        # else:
+        #     print(f"--- [DEBUG] NO se encontraron hilos (historial vacío) ---")
+        return threads
+
+    # Función principal que llama el interfaz (frontend) para listar chats
+    async def list_threads(self, pagination, filters):
+        # print(f"--- [DEBUG] Listando hilos con filtros: {filters} ---")
+        return await super().list_threads(pagination, filters)
+
+    # Función para verificar si el usuario existe en la base de datos
+    async def get_user(self, identifier: str):
+        # print(f"--- [DEBUG] Buscando usuario: {identifier} ---")
+        user = await super().get_user(identifier)
+        # if user:
+        #     print(f"--- [DEBUG] Usuario encontrado: {user.id} ({user.identifier}) ---")
+        # else:
+        #     print(f"--- [DEBUG] Usuario NO encontrado en BD ---")
+        return user
+
+# Inicialización de la Base de Datos
+db_path = os.path.join(os.getcwd(), "chat_history.db")
+print(f"--- [SISTEMA] Base de datos de historial en: {db_path} ---")
+
+# Asignamos nuestra capa de datos personalizada a Chainlit
+cl.data_layer = DebugSQLAlchemyDataLayer(
+    conninfo=f"sqlite+aiosqlite:///{db_path}", 
+    show_logger=False,
+    storage_provider=DummyStorageClient()
+)
+if cl.data_layer:
+    print("--- [SISTEMA] Persistencia activada correctamente ---")
+
+# --- SECCIÓN 2: AUTENTICACIÓN (LOGIN) ---
+# Sistema simple que lee usuarios y contraseñas desde 'users.json'.
+
+def load_users():
+    """Carga la lista de usuarios permitidos desde el archivo JSON."""
+    try:
+        with open("users.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+@cl.password_auth_callback
+async def auth_callback(username, password):
+    """
+    Función que Chainlit llama cuando alguien intenta loguearse.
+    Verifica si el usuario y contraseña coinciden con 'users.json'.
+    """
+    users = load_users()
+    expected_pass = users.get(username)
+    if expected_pass and expected_pass == password:
+        # Si es correcto, devuelve un usuario autorizado
+        return cl.User(identifier=username, metadata={"role": "user"})
     return None
 
-
-def _normalize_contrato_keys(contratos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Compatibilidad por si algún sitio devuelve 'resumen'."""
-    out: List[Dict[str, Any]] = []
-    for c in contratos or []:
-        if not isinstance(c, dict):
-            continue
-        c2 = dict(c)
-        if "abstract" not in c2 and "resumen" in c2:
-            c2["abstract"] = c2.get("resumen") or ""
-        out.append(c2)
-    return out
-
-
-def _empresa_context_header(empresa_lookup: str, empresas: List[Dict[str, Any]]) -> str:
-    lines: List[str] = []
-    lines.append("=== RESOLUCIÓN DE EMPRESA ===")
-    lines.append(f"Consulta empresa (input usuario): {empresa_lookup}")
-    if empresas:
-        top = empresas[0]
-        lines.append(f"Empresa candidata top: {top.get('nombre')} (NIF: {top.get('nif')})")
-        lines.append(f"Adjudicaciones (count): {top.get('adjudicaciones_count')} | Total: {top.get('adjudicaciones_total')}")
-    else:
-        lines.append("No se han encontrado coincidencias directas en EmpresaRAG (se intenta igualmente por contratos).")
-    return "\n".join(lines)
-
-
-async def handle_generate_ppt(question: str, allow_clarifications: bool = True):
-    plan = await cl.make_async(plan_ppt_clarifications)(question)
-    if (
-        allow_clarifications
-        and not cl.user_session.get("ppt_clarifications_sent", False)
-        and plan["need_clarification"]
-        and plan["questions"]
-    ):
-        cl.user_session.set("ppt_pending", True)
-        cl.user_session.set("ppt_request_base", plan["normalized_request"])
-        cl.user_session.set("ppt_questions", plan["questions"])
-        cl.user_session.set("ppt_clarifications_sent", True)
-
-        qtxt = "\n".join([f"{i+1}. {q}" for i, q in enumerate(plan["questions"])])
-        await cl.Message(
-            content=(
-                "Antes de redactar el PPT necesito aclarar algunas cosas:\n\n"
-                f"{qtxt}\n\n"
-                "Respóndeme en un solo mensaje (puedes numerar tus respuestas)."
-            )
-        ).send()
-        return
-
-    normalized_question = plan.get("normalized_request", question)
-
-    await cl.Message(content="Generando PPT basado en un pliego de referencia del grafo…").send()
-
-    emb = await cl.make_async(embed_text)(normalized_question)
-    if not emb:
-        await cl.Message("No he podido calcular el embedding de la petición.").send()
-        return
-
-    ref_contrato = await cl.make_async(find_reference_ppt_contract)(emb, top_k=10)
-    if not ref_contrato:
-        await cl.Message("No he encontrado un PPT de referencia adecuado.").send()
-        return
-
-    contract_id = ref_contrato["contract_id"]
-    ref_data = await cl.make_async(get_ppt_reference_data)(contract_id)
-    if ref_data is None:
-        await cl.Message(f"El contrato {contract_id} no tiene PPT con capítulos en el grafo.").send()
-        return
-
-    extra_caps = await cl.make_async(search_capitulos)(emb, k=min(12, config.K_CAPITULOS), doc_tipo="PPT")
-    extra_extractos = await cl.make_async(search_extractos)(emb, k=min(20, config.K_EXTRACTOS), tipos=None, doc_tipo="PPT")
-
-    evidence_md = build_evidence_markdown(
-        contratos=[
-            {
-                "expediente": ref_data.get("expediente"),
-                "titulo": ref_data.get("contrato_titulo"),
-                "adjudicataria_nombre": ref_contrato.get("adjudicataria_nombre"),
-                "importe_adjudicado": ref_contrato.get("importe_adjudicado"),
-            }
-        ],
-        capitulos=[
-            {
-                "heading": c.get("heading"),
-                "expediente": ref_data.get("expediente"),
-                "fuente_doc": "PPT",
-                "texto": c.get("texto", ""),
-            }
-            for c in ref_data.get("capitulos", [])[:12]
-        ],
-        extractos=[
-            {
-                "tipo": ex.get("tipo"),
-                "expediente": ex.get("expediente"),
-                "fuente_doc": ex.get("fuente_doc"),
-                "texto": ex.get("texto", ""),
-            }
-            for ex in extra_extractos[:12]
-        ],
-    )
-
-    await clear_evidence_sidebar()
-    await set_evidence_sidebar(
-        title="Evidencias RAG usadas (PPT)",
-        markdown=evidence_md,
-        props_extra={
-            "mode": "PPT",
-            "filters": {"doc_tipo": "PPT"},
-            "counts": {
-                "contratos": 1,
-                "capitulos": len(ref_data.get("capitulos", [])[:12]),
-                "extractos": len(extra_extractos[:12]),
-            },
-        },
-    )
-
-    system_msg, user_msg = build_ppt_generation_prompt_one_by_one(normalized_question, ref_data)
-
-    msg = cl.Message(content="")
-    await msg.send()
-
-    stream = llm_client.chat.completions.create(
-        model=config.LLM_MODEL,
-        messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
-        max_tokens=6000,
-        temperature=0.2,
-        stream=True,
-    )
-
-    pliego_chunks: List[str] = []
-    for chunk in stream:
-        token = chunk.choices[0].delta.content or ""
-        if token:
-            pliego_chunks.append(token)
-            await msg.stream_token(token)
-
-    await msg.update()
-    pliego_text = "".join(pliego_chunks).strip()
-
-    ppt_title = "Pliego de Prescripciones Técnicas"
-    m = re.search(r"^#\s*(.+)$", pliego_text, flags=re.MULTILINE)
-    if m:
-        ppt_title = m.group(1).strip()
-
-    if HAS_DOCX:
-        docx_bytes = ppt_to_docx_bytes(pliego_text, title=ppt_title)
-        file = cl.File(
-            name=f"{slug_filename(ppt_title)}.docx",
-            content=docx_bytes,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        )
-        await cl.Message(content=f"Documento Word generado: **{ppt_title}**", elements=[file]).send()
-    else:
-        await cl.Message(content="(Aviso) No puedo generar Word porque python-docx no está disponible.").send()
-
-    ppt_summary = await cl.make_async(summarize_for_memory)(pliego_text, config.MEMORY_SUMMARY_TOKENS)
-    await cl.Message(content=f"Resumen del PPT (memoria corta):\n\n{ppt_summary}").send()
-
-    cl.user_session.set("ppt_clarifications_sent", False)
-
+# --- SECCIÓN 3: INICIO DE CHAT Y ESTADO ---
 
 @cl.on_chat_start
 async def on_chat_start():
-    cl.user_session.set("history", [])
-    cl.user_session.set("ppt_pending", False)
-    cl.user_session.set("ppt_request_base", "")
-    cl.user_session.set("ppt_questions", [])
-    cl.user_session.set("ppt_clarifications_sent", False)
+    """
+    Se ejecuta CADA VEZ que se inicia una nueva sesión o se refresca la página.
+    Aquí inicializamos las variables de memoria ("session") para este usuario.
+    """
+    # Inicializamos variables vacías en la sesión del usuario
+    cl.user_session.set("history", [])              # Historial de mensajes para el LLM
+    cl.user_session.set("ppt_pending", False)       # ¿Estamos pendientes de generar un PPT?
+    cl.user_session.set("ppt_request_base", "")     # Petición base del PPT
+    cl.user_session.set("ppt_questions", [])        # Preguntas de clarificación pendientes
+    cl.user_session.set("ppt_clarifications_sent", False) 
+
+    # Estado del "Router" (cerebro decisor) para recordar contexto entre mensajes
     cl.user_session.set(
         "router_state",
         {
@@ -220,13 +133,17 @@ async def on_chat_start():
             "last_empresa_nif": None,
             "last_contratos": [],
             "last_capitulos": [],
+            "last_table_markdown": None, # Para recordar tablas y responder sobre ellas
             "last_extractos": [],
             "last_doc_tipo": None,
             "last_extracto_tipos": None,
         },
     )
 
-    # 1) Mensaje inicial inmediatamente (reduce el “flash”)
+    if cl.context.session.thread_id:
+        print(f"--- [SISTEMA] Chat iniciado. ID de Hilo: {cl.context.session.thread_id} ---")
+
+    # Enviamos el mensaje de bienvenida con "acciones" (botones de acceso rápido)
     await cl.Message(
         content=(
             "Hola. Soy el asistente virtual del área de contratación de la Diputación Provincial de Huelva.\n\n"
@@ -255,27 +172,46 @@ async def on_chat_start():
         ],
     ).send()
 
-    # 2) Limpieza del sidebar después (no frena el primer render)
+    # Limpiamos la barra lateral de evidencias al empezar
     try:
         await clear_evidence_sidebar()
-    except Ecxception:
+    except Exception:
         pass
 
+@cl.on_chat_resume
+async def on_chat_resume(thread):
+    """
+    CRÍTICO: Se ejecuta cuando un usuario pincha en una conversación antigua del historial.
+    Sin esta función, Chainlit no muestra el historial porque no sabría cómo "reanudarlo".
+    """
+    print(f"--- [SISTEMA] Reanudando chat antiguo: {thread['id']} ---")
+    # Aquí podríamos recuperar memoria específica si fuera necesario.
+    # Por defecto, Chainlit ya carga los mensajes antiguos en la interfaz.
+    cl.user_session.set("history", []) 
+    # (El resto del estado se reinicia limpio, ya que es una nueva interacción sobre un chat viejo)
+
+# --- SECCIÓN 4: GESTIÓN DE MENSAJES E INTERACCIONES ---
 
 @cl.action_callback("quick_prompt")
 async def quick_prompt(action: cl.Action):
+    """
+    Se ejecuta cuando el usuario pulsa un botón de acceso rápido (Action).
+    Simula que el usuario ha escrito ese texto.
+    """
     text = (action.payload or {}).get("text", "")
     if not text:
         return
 
-    # 1) Lo mostramos como si lo hubiera escrito el usuario (opcional pero queda natural)
+    # Enviamos el mensaje a la interfaz como si fuera del usuario
     await cl.Message(content=text).send()
-
-    # 2) Ejecutamos tu pipeline normal
+    # Y lo procesamos
     await on_message(cl.Message(content=text))
 
 @cl.action_callback("follow_up_question")
 async def on_follow_up_question(action: cl.Action):
+    """
+    Se ejecuta cuando el usuario pulsa una 'pregunta sugerida' (Follow-up).
+    """
     payload = action.payload or {}
     q = payload.get("question")
     if not q:
@@ -285,463 +221,18 @@ async def on_follow_up_question(action: cl.Action):
 
 @cl.on_message
 async def on_message(message: cl.Message):
+    """
+    FUNCIÓN PRINCIPAL: Se ejecuta cada vez que el usuario envía un mensaje de texto.
+    """
     question = (message.content or "").strip()
     if not question:
         await cl.Message(content="No he recibido ninguna pregunta.").send()
         return
 
-    if cl.user_session.get("ppt_pending", False):
-        base_req = cl.user_session.get("ppt_request_base", "")
-        final_req = f"{base_req}\n\nAclaraciones del usuario:\n{question}"
-        cl.user_session.set("ppt_pending", False)
-        cl.user_session.set("ppt_request_base", "")
-        cl.user_session.set("ppt_questions", [])
-        history: List[Dict[str, str]] = cl.user_session.get("history", [])
-        await handle_generate_ppt(final_req, allow_clarifications=False)
-        history.append({"role": "user", "content": final_req})
-        history.append({"role": "assistant", "content": f"PPT generado (fecha {config.TODAY_STR})."})
-        cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
-        return
-
-    history: List[Dict[str, str]] = cl.user_session.get("history", [])
-    router_state: Dict[str, Any] = cl.user_session.get(
-        "router_state",
-        {
-            "last_focus": None,
-            "last_empresa_query": None,
-            "last_empresa_nif": None,
-            "last_contratos": [],
-            "last_capitulos": [],
-            "last_extractos": [],
-            "last_doc_tipo": None,
-            "last_extracto_tipos": None,
-        },
-    )
-
-    thinking_msg = await cl.Message(content="Detectando intención...").send()
-
-    try:
-        intent = await cl.make_async(detect_intent)(question, history, router_state)
-
-        # Saludo
-        if intent.get("is_greeting"):
-            await thinking_msg.update()
-            await cl.Message(
-                content=(
-                    "Hola. Dime qué necesitas buscar.\n\n"
-                    "Ejemplos:\n"
-                    "- \"¿Qué contratos ha ganado Techfriendly?\"\n"
-                    "- \"¿Me haces un pliego de prescripciones técnicas para el Suministro de un vehículo 4x4 para el servicio forestal?\"\n"
-                    "- \"Top 10 adjudicatarias por importe adjudicado\""
-                )
-            ).send()
-            return
-
-        # PPT
-        if intent["intent"] == "GENERATE_PPT":
-            await thinking_msg.update()
-            await handle_generate_ppt(question)
-            history.append({"role": "user", "content": question})
-            history.append({"role": "assistant", "content": f"PPT generado (fecha {config.TODAY_STR})."})
-            cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
-            return
-
-        focus = (intent.get("focus") or "CONTRATO").upper()
-
-        # CYPHER (agregaciones)
-        if intent["intent"] == "CYPHER_QA":
-            # Caso especial: agregación por EMPRESA => determinístico (NO LLM Cypher)
-            if focus == "EMPRESA":
-                empresa_lookup = _empresa_lookup(intent, router_state)
-                if empresa_lookup:
-                    thinking_msg.content = f"Calculando agregados de adjudicaciones para empresa: {empresa_lookup} ..."
-                    await thinking_msg.update()
-
-                    stats = await cl.make_async(empresa_awards_stats)(empresa_lookup)
-                    if not stats:
-                        await cl.Message(content=f"No he encontrado la empresa '{empresa_lookup}' en el grafo.").send()
-                        return
-
-                    nombre = stats.get("nombre") or empresa_lookup
-                    nif = stats.get("nif") or "N/D"
-                    n_contratos = stats.get("contratos_ganados", 0)
-                    importe_total = stats.get("importe_total", 0)
-
-                    # Evidencias: resolvemos empresa + lista top contratos (opcional)
-                    contratos = await cl.make_async(search_contratos_by_empresa)(empresa_lookup, k_empresas=3, k_contratos=12)
-                    contratos = _normalize_contrato_keys(contratos)
-
-                    ev_md = "### Evidencias (Empresa / Agregación)\n"
-                    ev_md += f"**Input usuario:** {empresa_lookup}\n\n"
-                    ev_md += f"**Empresa resuelta:** {nombre} (NIF: {nif})\n\n"
-                    ev_md += f"**Contratos ganados (count):** {n_contratos}\n\n"
-                    ev_md += f"**Importe total adjudicado (aprox):** {importe_total}\n\n"
-                    if contratos:
-                        ev_md += "**Top contratos (preview):**\n"
-                        for c in contratos[:10]:
-                            ev_md += f"- {c.get('expediente')} · {c.get('titulo')} · importe={c.get('importe_adjudicado')}\n"
-
-                    await set_evidence_sidebar(
-                        title="Evidencias Neo4j (Empresa)",
-                        markdown=ev_md,
-                        props_extra={"mode": "EMPRESA"},
-                        context_text=None,
-                    )
-
-                    # Respuesta principal
-                    content = f"{nombre} (NIF: {nif}) ha ganado **{n_contratos}** contratos."
-                    # Si el usuario preguntaba "cuántos", con esto basta; si quieres, añadimos importe total como extra útil
-                    content += f"\nImporte total adjudicado (según el grafo): **{importe_total}**."
-                    if contratos:
-                        content += "\n\nContratos (preview):"
-                        for c in contratos[:10]:
-                            content += f"\n- Expediente: {c.get('expediente')} · {c.get('titulo')}"
-
-                    await cl.Message(content=content).send()
-
-                    # Estado + memoria (guardamos también contratos para permitir follow-ups contextualizados)
-                    router_state.update(
-                        {
-                            "last_focus": "EMPRESA",
-                            "last_empresa_query": empresa_lookup,
-                            "last_empresa_nif": nif if nif != "N/D" else intent.get("empresa_nif"),
-                            "last_contratos": contratos,
-                            "last_capitulos": [],
-                            "last_extractos": [],
-                            "last_doc_tipo": None,
-                            "last_extracto_tipos": None,
-                        }
-                    )
-                    cl.user_session.set("router_state", router_state)
-
-                    history.append({"role": "user", "content": question})
-                    history.append({"role": "assistant", "content": content})
-                    cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
-
-                    thinking_msg.content = "Respuesta generada (Empresa/Aggregación)."
-                    await thinking_msg.update()
-                    return
-
-            # Resto de agregaciones => tu cypher_qa actual
-            thinking_msg.content = "Generando y ejecutando consulta a base de datos..."
-            await thinking_msg.update()
-
-            out = await cl.make_async(cypher_qa)(question)
-            if out.get("error"):
-                await cl.Message(content=f"No he podido ejecutar consulta QA.\nDetalle: {out.get('error')}").send()
-                return
-
-            answer = out["answer"]
-            await cl.Message(content=answer).send()
-
-            history.append({"role": "user", "content": question})
-            answer_mem = await cl.make_async(summarize_for_memory)(answer, config.MEMORY_SUMMARY_TOKENS) if len(answer) > 2000 else answer
-            history.append({"role": "assistant", "content": answer_mem})
-            cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
-
-            thinking_msg.content = f"Respuesta generada. Tokens aprox: enviados={estimate_tokens(question)}, generados={estimate_tokens(answer)}"
-            await thinking_msg.update()
-            return
-
-        # RAG
-        # Caso EMPRESA: buscamos por nombre en el grafo (no dependemos del embedding para localizar la empresa)
-        if focus == "EMPRESA":
-            empresa_lookup = _empresa_lookup(intent, router_state)
-            thinking_msg.content = f"Buscando adjudicaciones por empresa: {empresa_lookup or '(no resuelta)'} ..."
-            await thinking_msg.update()
-
-            empresas = []
-            contratos = []
-            if empresa_lookup:
-                empresas = await cl.make_async(search_empresas)(empresa_lookup, 5, 12)
-                contratos = await cl.make_async(search_contratos_by_empresa)(empresa_lookup, 3, max(25, config.K_CONTRATOS))
-
-                router_state["last_focus"] = "EMPRESA"
-                router_state["last_empresa_query"] = empresa_lookup
-                router_state["last_empresa_nif"] = (empresas[0].get("nif") if empresas else intent.get("empresa_nif"))
-                cl.user_session.set("router_state", router_state)
-
-            contratos = _normalize_contrato_keys(contratos)
-
-            # Si no encontramos contratos por empresa, caemos al RAG vector normal
-            if not contratos:
-                focus = "CONTRATO"
-            else:
-                # Embedding para enriquecer con extractos/capítulos relacionados, pero filtrados por expedientes adjudicados
-                embedding = await cl.make_async(embed_text)(question)
-                capitulos = []
-                extractos = []
-                if embedding:
-                    doc_tipo = intent.get("doc_tipo")
-                    tipos = intent.get("extracto_tipos")
-                    allowed = [c.get("expediente") for c in contratos if c.get("expediente")]
-                    seen = set()
-                    allowed = [x for x in allowed if x and not (x in seen or seen.add(x))]
-
-                    capitulos = await cl.make_async(search_capitulos)(
-                        embedding,
-                        k=config.K_CAPITULOS,
-                        doc_tipo=doc_tipo,
-                        expedientes=allowed,
-                    )
-
-                    extractos = await cl.make_async(search_extractos)(
-                        embedding,
-                        k=config.K_EXTRACTOS,
-                        tipos=tipos,
-                        doc_tipo=doc_tipo,
-                        expedientes=allowed,
-                    )
-
-
-                evidence_md = build_evidence_markdown(contratos, capitulos, extractos)
-                context = build_context(question, contratos, capitulos, extractos)
-                if empresa_lookup:
-                    context = _empresa_context_header(empresa_lookup, empresas) + "\n\n" + context
-
-                system_msg = (
-                    "Eres un asistente experto en contratación pública. "
-                    "Respondes SOLO con la información del contexto. No inventas datos."
-                )
-
-                history_short = history[-config.MAX_HISTORY_TURNS:]
-                history_trimmed = trim_history_to_fit(
-                    history=history_short,
-                    system_msg=system_msg,
-                    user_msg=context,
-                    max_context_tokens=config.MODEL_MAX_CONTEXT_TOKENS,
-                    reserve_for_answer=config.RESERVE_FOR_ANSWER_TOKENS,
-                )
-
-                rep = context_token_report(system_msg, history_trimmed, context)
-
-                await set_evidence_sidebar(
-                    title="Evidencias RAG usadas (Empresa)",
-                    markdown=evidence_md,
-                    props_extra={
-                        "mode": "RAG_EMPRESA",
-                        "filters": {"empresa": empresa_lookup},
-                        "tokens": {"sent_approx": rep["total"], "budget": config.MODEL_MAX_CONTEXT_TOKENS},
-                        "counts": {"contratos": len(contratos), "capitulos": len(capitulos), "extractos": len(extractos)},
-                    },
-                    context_text=context,
-                )
-
-                messages_llm: List[Dict[str, str]] = [{"role": "system", "content": system_msg}]
-                messages_llm.extend(history_trimmed)
-                messages_llm.append({"role": "user", "content": context})
-
-                reply = cl.Message(content="")
-                await reply.send()
-
-                stream = llm_client.chat.completions.create(
-                    model=config.LLM_MODEL,
-                    messages=messages_llm,
-                    temperature=0.2,
-                    stream=True,
-                    max_tokens=1200,
-                )
-
-                full_answer: List[str] = []
-                for chunk in stream:
-                    token = chunk.choices[0].delta.content or ""
-                    if token:
-                        full_answer.append(token)
-                        await reply.stream_token(token)
-
-                await reply.update()
-                answer = "".join(full_answer).strip()
-
-                history.append({"role": "user", "content": question})
-                answer_mem = await cl.make_async(summarize_for_memory)(answer, config.MEMORY_SUMMARY_TOKENS) if len(answer) > 2000 else answer
-                history.append({"role": "assistant", "content": answer_mem})
-                cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
-
-                suggestions: List[str] = []
-                if should_generate_followups(answer, contratos, capitulos, extractos):
-                    suggestions = await cl.make_async(generate_follow_up_questions)(question, answer, 3)
-
-                actions: List[cl.Action] = []
-                for s in suggestions:
-                    label = s if len(s) <= config.SUGGESTION_LABEL_MAX_CHARS else s[: config.SUGGESTION_LABEL_MAX_CHARS - 1] + "…"
-                    actions.append(
-                        cl.Action(
-                            name="follow_up_question",
-                            label=label,
-                            tooltip=s,
-                            payload={"question": s},
-                            icon="sparkles",
-                        )
-                    )
-
-                reply.actions = actions
-                await reply.update()
-
-                router_state.update(
-                    {
-                        "last_focus": "EMPRESA",
-                        "last_contratos": contratos,
-                        "last_capitulos": capitulos,
-                        "last_extractos": extractos,
-                        "last_doc_tipo": doc_tipo,
-                        "last_extracto_tipos": tipos,
-                    }
-                )
-                cl.user_session.set("router_state", router_state)
-
-                thinking_msg.content = f"Respuesta generada (RAG Empresa). Tokens aprox: enviados={rep['total']}, generados={estimate_tokens(answer)}"
-                await thinking_msg.update()
-                return
-
-        # RAG normal (CONTRATO)
-        thinking_msg.content = "Ejecutando RAG (vector search) con filtros..."
-        await thinking_msg.update()
-
-        use_cached_context = bool(intent.get("is_followup") and router_state.get("last_contratos"))
-        if use_cached_context:
-            contratos = router_state.get("last_contratos", [])
-            contratos = _normalize_contrato_keys(contratos)
-
-            # Doc tipo / tipos: si el intent trae algo nuevo, debe sobrescribir.
-            doc_tipo = intent.get("doc_tipo") or router_state.get("last_doc_tipo")
-            tipos = intent.get("extracto_tipos") or router_state.get("last_extracto_tipos")
-
-            # Embedding del follow-up (para buscar solo dentro del/los contratos anteriores)
-            embedding = await cl.make_async(embed_text)(question)
-            if not embedding:
-                thinking_msg.content = "No he podido generar el embedding para el seguimiento."
-                await thinking_msg.update()
-                return
-
-            allowed = [c.get("expediente") for c in contratos if c.get("expediente")]
-            # Dedup
-            seen = set()
-            allowed = [x for x in allowed if x and not (x in seen or seen.add(x))]
-
-            # IMPORTANTE: estas funciones deben aceptar "expedientes" como filtro
-            capitulos = await cl.make_async(search_capitulos)(embedding, config.K_CAPITULOS, doc_tipo, allowed)
-            extractos = await cl.make_async(search_extractos)(embedding, config.K_EXTRACTOS, tipos, doc_tipo, allowed)
-
-        else:
-            embedding = await cl.make_async(embed_text)(question)
-            if not embedding:
-                thinking_msg.content = "No he podido generar el embedding."
-                await thinking_msg.update()
-                return
-
-            doc_tipo = intent.get("doc_tipo")
-            tipos = intent.get("extracto_tipos")
-
-            contratos = await cl.make_async(search_contratos)(embedding, config.K_CONTRATOS)
-            capitulos = await cl.make_async(search_capitulos)(embedding, config.K_CAPITULOS, doc_tipo)
-            extractos = await cl.make_async(search_extractos)(embedding, config.K_EXTRACTOS, tipos, doc_tipo)
-
-        contratos = _normalize_contrato_keys(contratos)
-
-        evidence_md = build_evidence_markdown(contratos, capitulos, extractos)
-        context = build_context(question, contratos, capitulos, extractos)
-
-        system_msg = (
-            "Eres un asistente experto en contratación pública. "
-            "Respondes SOLO con la información del contexto. No inventas datos."
-        )
-
-        history_short = history[-config.MAX_HISTORY_TURNS:]
-        history_trimmed = trim_history_to_fit(
-            history=history_short,
-            system_msg=system_msg,
-            user_msg=context,
-            max_context_tokens=config.MODEL_MAX_CONTEXT_TOKENS,
-            reserve_for_answer=config.RESERVE_FOR_ANSWER_TOKENS,
-        )
-
-        rep = context_token_report(system_msg, history_trimmed, context)
-
-        thinking_msg.content = (
-            f"Redactando respuesta… Tokens aprox enviados={rep['total']} "
-            f"(sys={rep['system']}, hist={rep['history']}, ctx={rep['user']}). "
-            f"Filtros: doc_tipo={doc_tipo}, extracto_tipos={tipos}"
-        )
-        await thinking_msg.update()
-
-        await set_evidence_sidebar(
-            title="Evidencias RAG usadas",
-            markdown=evidence_md,
-            props_extra={
-                "mode": "RAG",
-                "filters": {"doc_tipo": doc_tipo, "extracto_tipos": tipos},
-                "tokens": {"sent_approx": rep["total"], "budget": config.MODEL_MAX_CONTEXT_TOKENS},
-                "counts": {"contratos": len(contratos), "capitulos": len(capitulos), "extractos": len(extractos)},
-            },
-            context_text=context,
-        )
-
-        messages_llm: List[Dict[str, str]] = [{"role": "system", "content": system_msg}]
-        messages_llm.extend(history_trimmed)
-        messages_llm.append({"role": "user", "content": context})
-
-        reply = cl.Message(content="")
-        await reply.send()
-
-        stream = llm_client.chat.completions.create(
-            model=config.LLM_MODEL,
-            messages=messages_llm,
-            temperature=0.2,
-            stream=True,
-            max_tokens=1200,
-        )
-
-        full_answer: List[str] = []
-        for chunk in stream:
-            token = chunk.choices[0].delta.content or ""
-            if token:
-                full_answer.append(token)
-                await reply.stream_token(token)
-
-        await reply.update()
-        answer = "".join(full_answer).strip()
-
-        history.append({"role": "user", "content": question})
-        answer_mem = await cl.make_async(summarize_for_memory)(answer, config.MEMORY_SUMMARY_TOKENS) if len(answer) > 2000 else answer
-        history.append({"role": "assistant", "content": answer_mem})
-        cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])
-
-        suggestions: List[str] = []
-        if should_generate_followups(answer, contratos, capitulos, extractos):
-            suggestions = await cl.make_async(generate_follow_up_questions)(question, answer, 3)
-
-        actions: List[cl.Action] = []
-        for s in suggestions:
-            label = s if len(s) <= config.SUGGESTION_LABEL_MAX_CHARS else s[: config.SUGGESTION_LABEL_MAX_CHARS - 1] + "…"
-            actions.append(
-                cl.Action(
-                    name="follow_up_question",
-                    label=label,
-                    tooltip=s,
-                    payload={"question": s},
-                    icon="sparkles",
-                )
-            )
-
-        reply.actions = actions
-        await reply.update()
-
-        router_state.update(
-            {
-                "last_focus": "CONTRATO",
-                "last_contratos": contratos,
-                "last_capitulos": capitulos,
-                "last_extractos": extractos,
-                "last_doc_tipo": doc_tipo,
-                "last_extracto_tipos": tipos,
-            }
-        )
-        cl.user_session.set("router_state", router_state)
-
-        thinking_msg.content = f"Respuesta generada (RAG). Tokens aprox: enviados={rep['total']}, generados={estimate_tokens(answer)}"
-        await thinking_msg.update()
-
-    except Exception as e:
-        print(f"[ERROR] {e}")
-        thinking_msg.content = "Ha ocurrido un error. Revisa logs."
-        await thinking_msg.update()
+    # Usamos cl.Step para envolver el proceso.
+    # Esto teóricamente ayuda a la persistencia automática, aunque usamos sincronización manual
+    # en 'orchestrate_message' para asegurar que se guarda.
+    async with cl.Step(name="Procesando", type="run") as step:
+        step.input = question
+        # Llamamos al Orquestador para que decida qué hacer con la pregunta
+        await orchestrate_message(question)

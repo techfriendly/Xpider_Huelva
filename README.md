@@ -1,232 +1,134 @@
-# Asistente RAG/Cypher para contratos (Huelva)
+# Xpider Huelva: Asistente Inteligente de Contratación
 
-Este repositorio contiene un asistente conversacional construido con [Chainlit](https://docs.chainlit.io/) para explorar un grafo de contratación pública en Neo4j. El bot combina búsquedas vectoriales (GraphRAG), generación de consultas Cypher de solo lectura y un generador de borradores de Pliegos de Prescripciones Técnicas (PPT).
+Este proyecto implementa un asistente conversacional avanzado diseñado para el área de contratación de la Diputación de Huelva. Utiliza tecnologías de **RAG (Retrieval-Augmented Generation)**, **Grafos de Conocimiento (Neo4j)** y **Agentes (LangGraph)** para responder preguntas complejas, realizar análisis de datos y generar borradores de pliegos técnicos.
 
-## Estructura principal
+---
 
-* `app.py`: orquesta el ciclo de chat en Chainlit, enruta intenciones y muestra evidencias en la barra lateral.
-* `config.py`: variables de entorno y constantes (Neo4j, LLM, embeddings y límites de tokens).
-* `clients.py`: inicializa los clientes compartidos de Neo4j y servicios OpenAI-compatibles.
-* `services/`: lógica de negocio (RAG, generación y validación de Cypher, embeddings, generación de PPT, follow-ups y construcción de contexto).
-* `chat_utils/`: utilidades de texto y parsing robusto de JSON devuelto por el modelo.
-* `ui/`: helpers para renderizar evidencias en la UI de Chainlit.
-* `public/`: recursos estáticos para el visor de grafo y elementos personalizados.
+## 📚 Guía de Uso y Prompts
 
-## Puesta en marcha (desarrollo)
+El asistente es capaz de manejar diferentes tipos de intenciones. A continuación se detallan ejemplos de cómo interactuar para obtener los mejores resultados.
 
-1. Crea y activa un entorno virtual:
+### 1. Consultas Generales (RAG)
+Preguntas sobre contenido textual de los pliegos (normativa, cláusulas, objetos de contrato).
+* **Ejemplo 1**: _"¿Cuáles son los criterios de solvencia técnica para contratos de limpieza?"_
+* **Ejemplo 2**: _"Resúmeme el objeto del contrato del expediente 22suAS58."_
+* **Ejemplo 3**: _"¿Qué dice la cláusula de protección de datos en los contratos de suministros?"_
 
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-2. Instala dependencias:
+### 2. Análisis de Datos (Cypher / Neo4j)
+Preguntas que requieren agregación, conteo o filtrado estructurado sobre la base de datos de contratos.
+* **Ejemplo 1**: _"Top 10 empresas por número de contratos ganados."_
+* **Ejemplo 2**: _"¿Cuánto se ha adjudicado en contratos relacionados con limpieza?"_
+* **Ejemplo 3**: _"Listar todas las adjudicaciones ganadas por la empresa Techfriendly."_
 
-   ```bash
-   pip install -U pip
-   pip install -r requirements.txt
-   ```
-3. Crea un `.env` (opcional pero recomendado) con las variables necesarias (ver sección "Variables de entorno").
-4. Ejecuta:
+### 3. Generación de Documentos (PPT)
+El asistente puede redactar borradores de **Pliegos de Prescripciones Técnicas** basándose en contratos previos similares.
+* **Ejemplo 1**: _"Redacta un PPT para el suministro de un vehículo todoterreno 4x4 forestal."_
+* **Ejemplo 2**: _"Necesito un pliego para la contratación de un servicio de desarrollo web con Next.js."_
 
-   ```bash
-   chainlit run app.py -w
-   ```
+> **Nota**: El sistema te pedirá aclaraciones si la petición es ambigua. Una vez confirmado, generará el documento siguiendo estrictamente la estructura de un pliego de referencia real, pero adaptando el contenido técnico a tu petición.
 
-   El flag `-w` activa recarga en caliente durante el desarrollo.
+### 4. Chat sobre Historial (Memoria)
+Puedes hacer preguntas de seguimiento sobre la información que el asistente acaba de mostrar, sin necesidad de volver a buscar.
+* **Ejemplo 1**: _(Tras ver una tabla de empresas)_ _"¿A qué se dedica la tercera?"_
+* **Ejemplo 2**: _"Súmame los importes de las dos primeras."_
 
-## Despliegue en Ubuntu (servidor)
+---
 
-### 1) Dependencias del sistema
+## 🏗️ Arquitectura Técnica con LangGraph
 
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip git rsync
+El núcleo del chatbot está construido sobre **LangGraph**, una librería para orquestar flujos de agentes con estado. El sistema no es lineal; decide dinámicamente qué camino tomar (Router) en función de la pregunta del usuario.
+
+### Estructura del Grafo
+
+El flujo de decisión se modela como un grafo de estados (`StateGraph`). Aquí tienes una representación simplificada:
+
+```mermaid
+graph TD
+    START --> Router
+    Router -->|GENERATE_PPT| PPT_Plan
+    Router -->|CYPHER_QA| Cypher_Node
+    Router -->|RAG_QA| RAG_Node
+    Router -->|SIMPLE_CHAT| Simple_Chat_Node
+    Router -->|GREETING| Greeting_Node
+
+    PPT_Plan -->|Necesita Info| Post_Process
+    PPT_Plan -->|Listo| PPT_Generate
+    PPT_Generate --> Post_Process
+
+    Cypher_Node --> Post_Process
+    
+    RAG_Node -->|Fallo| Cypher_Node
+    RAG_Node -->|Éxito| Post_Process
+
+    Simple_Chat_Node -->|No sabe| Router
+    Simple_Chat_Node --> Post_Process
+
+    Post_Process --> END
 ```
 
-### 2) Clonar repositorio
+### Descripción de Nodos (`services/graph_nodes.py`)
+
+1.  **`router_node`**: Cerebro del sistema. Analiza la pregunta y el historial para clasificar la intención (`GENERATE_PPT`, `CYPHER_QA`, `RAG_QA`, `SIMPLE_CHAT`, `GREETING`).
+2.  **`cypher_node`**: Genera consultas Cypher (SQL para grafos) para interrogar a Neo4j. Valida la seguridad (solo lectura) y ejecuta la consulta.
+3.  **`rag_node`**: Realiza búsquedas vectoriales híbridas (semántica + palabras clave) para encontrar fragmentos de texto relevantes en los documentos.
+4.  **`ppt_plan_node`**: Fase de planificación de documentos. Decide si tiene suficiente información para escribir el PPT o si debe preguntar al usuario (bucle de feedback).
+5.  **`ppt_generate_node`**: Ejecuta la escritura del documento. Utiliza un pliego de referencia ("One-Shot Learning") para copiar la estructura de capítulos exacta pero reescribiendo el contenido técnico.
+6.  **`simple_chat_node`**: Atiende preguntas coloquiales o referencias al historial reciente (ej: "y la anterior?"). Si no puede responder, reenvía al Router (fallback).
+7.  **`post_process_node`**: Formatea la respuesta final, genera preguntas sugeridas (follow-ups) y gestiona el resumen de la memoria para no desbordar la ventana de contexto.
+
+---
+
+## 📂 Estructura del Proyecto
+
+*   `app.py`: Punto de entrada de **Chainlit**. Maneja la sesión de usuario y la UI.
+*   `config.py`: Configuración global (modelos LLM, credenciales Neo4j, límites de tokens).
+*   `services/`:
+    *   `graph.py`: Definición del `StateGraph` y las aristas (edges) condicionales.
+    *   `intent_router.py`: Lógica de clasificación de intenciones con LLM.
+    *   `cypher.py`: Generación y corrección de consultas Cypher.
+    *   `ppt_generation.py`: Lógica específica para redactar pliegos y exportar a Word.
+    *   `neo4j_queries.py`: Librería de consultas predefinidas a la base de datos.
+*   `prompts/`: Plantillas de texto (System Prompts) para instruir al LLM en cada tarea.
+
+---
+
+## 🚀 Instalación y Despliegue
+
+### Requisitos
+*   Python 3.10+
+*   Neo4j Database (con plugin GDS y APOC recomendados)
+*   LLM compatible con OpenAI API (GPT-4, Claude, o local via vLLM/Ollama)
+
+### 1. Configuración local
 
 ```bash
-git clone https://github.com/techfriendly/Xpider_Huelva.git
-cd Xpider_Huelva
+# Crear entorno virtual
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Instalar dependencias
+pip install -r requirements.txt
+
+# Configurar entorno
+cp .env.example .env
+# (Edita .env con tus claves de API y conexión a Neo4j)
+
+# Ejecutar en modo desarrollo (recarga automática)
+chainlit run app.py -w
 ```
 
-> Nota: para clonar por HTTPS, GitHub no usa contraseña de cuenta; usa un token (PAT) como password. Si prefieres no gestionar tokens, usa SSH.
+### 2. Despliegue (Systemd)
 
-### 3) Ejecución expuesta “hacia fuera”
+Para mantener el servicio activo en un servidor Ubuntu:
 
-Por defecto, un servicio puede quedarse escuchando solo en `127.0.0.1`. Para acceder desde fuera, Chainlit debe bindear en `0.0.0.0`:
+1.  Crear usuario `chainlit`.
+2.  Clonar repo en `/home/chainlit/Xpider_Huelva`.
+3.  Crear servicio `/etc/systemd/system/chainlit.service`:
 
-```bash
-chainlit run app.py --host 0.0.0.0 --port 8000
-```
-
-Verifica que está escuchando correctamente:
-
-```bash
-sudo ss -tulpn | grep ":8000"
-```
-
-Deberías ver `0.0.0.0:8000` (o la IP del servidor), no `127.0.0.1:8000`.
-
-## Ejecutar Chainlit como servicio persistente (systemd)
-
-Esta es la configuración recomendada para que el asistente siga activo tras cerrar la sesión SSH y arranque automáticamente al reiniciar.
-
-### 1) Crear usuario de servicio (sin login interactivo)
-
-```bash
-sudo adduser --disabled-password --gecos "" chainlit
-```
-
-### 2) Copiar el proyecto al home del usuario de servicio
-
-Si tu working copy actual está en otra ruta (por ejemplo `/root/Xpider_Huelva`), copia el contenido:
-
-```bash
-sudo mkdir -p /home/chainlit/Xpider_Huelva
-sudo rsync -a /root/Xpider_Huelva/ /home/chainlit/Xpider_Huelva/
-sudo chown -R chainlit:chainlit /home/chainlit/Xpider_Huelva
-```
-
-> Importante: ejecutar un servicio como usuario no-root contra rutas en `/root/...` suele fallar por permisos. Por eso movemos el repo a `/home/chainlit/...`.
-
-### 3) Crear entorno virtual e instalar dependencias (como `chainlit`)
-
-```bash
-sudo su - chainlit -c 'cd /home/chainlit/Xpider_Huelva && rm -rf .venv && python3 -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r requirements.txt'
-```
-
-### 4) Variables de entorno en `.env` (opcional)
-
-Crea `/home/chainlit/Xpider_Huelva/.env` con tus credenciales y endpoints.
-
-Recomendación de permisos:
-
-```bash
-sudo chown chainlit:chainlit /home/chainlit/Xpider_Huelva/.env
-sudo chmod 600 /home/chainlit/Xpider_Huelva/.env
-```
-
-> Si no tienes `.env` aún, el servicio puede arrancar igualmente si usas `EnvironmentFile=-...` (ver unidad más abajo).
-
-### 5) Crear unidad systemd
-
-```bash
-sudo tee /etc/systemd/system/chainlit.service >/dev/null <<'EOF'
-[Unit]
-Description=Chainlit RAG Huelva
-After=network.target
-
+```ini
 [Service]
-Type=simple
 User=chainlit
 WorkingDirectory=/home/chainlit/Xpider_Huelva
-Environment="PYTHONUNBUFFERED=1"
-EnvironmentFile=-/home/chainlit/Xpider_Huelva/.env
 ExecStart=/home/chainlit/Xpider_Huelva/.venv/bin/chainlit run app.py --host 0.0.0.0 --port 8000
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
+Restart=always
 ```
-
-Puntos clave:
-
-* `User=chainlit`: evita correr como root.
-* `WorkingDirectory` y `ExecStart` apuntan a rutas accesibles por el usuario.
-* `EnvironmentFile=-...` (con guion) evita que el servicio falle si el `.env` no existe aún.
-* Se fuerza el bind público con `--host 0.0.0.0`.
-
-### 6) Habilitar y arrancar
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl reset-failed chainlit.service
-sudo systemctl enable --now chainlit.service
-```
-
-### 7) Operación y diagnóstico
-
-Estado:
-
-```bash
-systemctl status chainlit.service --no-pager
-```
-
-Logs:
-
-```bash
-journalctl -u chainlit.service -n 200 --no-pager
-```
-
-Reiniciar tras cambios en código o `.env`:
-
-```bash
-sudo systemctl restart chainlit.service
-```
-
-Comprobar puerto:
-
-```bash
-sudo ss -tulpn | grep ":8000"
-```
-
-## Firewall y acceso externo
-
-Aunque el proceso escuche en `0.0.0.0:8000`, puede seguir sin ser accesible desde Internet si:
-
-* hay firewall local (UFW/nftables/iptables), o
-* hay firewall del proveedor (cloud).
-
-Comprobación rápida en servidor:
-
-```bash
-curl -v http://127.0.0.1:8000
-```
-
-Si en local funciona, pero desde fuera no, revisa firewall.
-
-Si usas UFW:
-
-```bash
-sudo ufw status verbose
-sudo ufw allow 8000/tcp
-```
-
-### Acceso sin abrir puertos (túnel SSH)
-
-Para usarlo sin exponer el puerto 8000 públicamente:
-
-En tu PC:
-
-```bash
-ssh -L 8000:127.0.0.1:8000 root@IP_DEL_SERVIDOR
-```
-
-Luego abre:
-`http://127.0.0.1:8000`
-
-## Variables de entorno clave
-
-* **Neo4j**: `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DB` (por defecto `huelva`).
-* **LLM (chat)**: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`.
-* **Embeddings**: `EMB_BASE_URL`, `EMB_API_KEY`, `EMB_MODEL`, `EMB_DIM`.
-* **Límites y parámetros RAG**: `K_CONTRATOS`, `K_CAPITULOS`, `K_EXTRACTOS`, `MAX_HISTORY_TURNS`, `MODEL_MAX_CONTEXT_TOKENS`, `RESERVE_FOR_ANSWER_TOKENS`, `RAG_CONTEXT_MAX_TOKENS`, entre otros definidos en `config.py`.
-
-## Flujos principales
-
-* **RAG (contratos/capítulos/extractos)**: `services.context_builder.build_context` compone el contexto a partir de resultados de búsqueda y `app.py` lo envía al LLM junto con el historial de chat.
-* **Consultas Cypher**: `services.cypher.generate_cypher_plan` crea consultas de solo lectura, las valida con `cypher_is_safe_readonly` y se ejecutan vía `services.neo4j_queries.neo4j_query`.
-* **Búsqueda de empresas**: `services.neo4j_queries.search_empresas` y `search_contratos_by_empresa` resuelven adjudicatarias por nombre o CIF y devuelven contratos asociados.
-* **Generación de PPT**: `services.ppt_generation.plan_ppt_clarifications` decide si pedir aclaraciones; `handle_generate_ppt` (en `app.py`) busca un PPT de referencia, genera el texto capítulo a capítulo y opcionalmente exporta a Word con `python-docx`.
-* **Evidencias en la UI**: `ui.evidence` prepara markdown y componentes para mostrar las fuentes y el contexto usado en cada respuesta.
-
-## Notas adicionales
-
-* El proyecto usa endpoints compatibles con la API de OpenAI para chat y embeddings; puedes apuntar a servidores locales u otras implementaciones compatibles.
-* La generación de documentos `.docx` es opcional y depende de `python-docx` (incluida en `requirements.txt`).
-* El grafo Neo4j se asume poblado con nodos `ContratoRAG`, `EmpresaRAG`, `DocumentoRAG`, `Capitulo` y `Extracto`, además de índices vectoriales definidos para las consultas.
-* Para entornos productivos, se recomienda poner un reverse proxy (por ejemplo Nginx) con HTTPS delante de Chainlit.
