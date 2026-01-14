@@ -7,7 +7,5 @@ __pycache__/
 venv/
 *.log
 *.db
-users.json
 .chainlit/
-node_modules/
 .DS_Store
