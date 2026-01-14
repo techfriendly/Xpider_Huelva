@@ -4,6 +4,12 @@ Este proyecto implementa un asistente conversacional avanzado diseñado para el 
 
 ---
 
+## 📘 Manual de instalación y administración
+
+Consulta la guía detallada de instalación, configuración y operación diaria en [`MANUAL_INSTALACION_ADMIN.md`](MANUAL_INSTALACION_ADMIN.md).
+
+---
+
 ## 📚 Guía de Uso y Prompts
 
 El asistente es capaz de manejar diferentes tipos de intenciones. A continuación se detallan ejemplos de cómo interactuar para obtener los mejores resultados.
