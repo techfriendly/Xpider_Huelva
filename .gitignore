@@ -8,4 +8,5 @@ venv/
 *.log
 *.db
 .DS_Store
+_backup_old_root/
 _backup_old_root
