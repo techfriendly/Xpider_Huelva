@@ -7,5 +7,5 @@ __pycache__/
 venv/
 *.log
 *.db
-.chainlit/
 .DS_Store
+_backup_old_root

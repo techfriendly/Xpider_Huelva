@@ -1,354 +1,355 @@
 """
-ORQUESTADOR PRINCIPAL: orchestrator.py
-DESCRIPCIÓN:
-Este archivo es el "Director de Orquesta".
-Recibe el mensaje del usuario desde app.py y se encarga de:
-1. Preparar el contexto (historial, estado).
-2. Ejecutar el Grafo de LangGraph (la lógica de decisión).
-3. Mostrar respuestas, errores o generadores en la interfaz visual (Chainlit).
-4. Sincronizar manualmente el historial en la base de datos (Persistencia).
+ORQUESTADOR V2: orchestrator.py
+Loop controlado con OpenAI function calling y streaming.
 """
-
 import chainlit as cl
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
+import json
+import re
+
 import config
 from clients import llm_client
-from services.context_builder import build_context
-from services.cypher import cypher_qa
-from services.embeddings import embed_text
-from services.followups import (
-    generate_follow_up_questions,
-    should_generate_followups,
-    summarize_for_memory,
-)
-from services.intent_router import detect_intent
-from services.neo4j_queries import (
-    empresa_awards_stats,
-    search_capitulos,
-    search_contratos,
-    search_contratos_by_empresa,
-    search_empresas,
-    search_extractos,
-)
-from services.ppt_generation import (
-    HAS_DOCX,
-    build_ppt_generation_prompt_one_by_one,
-    find_reference_ppt_contract,
-    get_ppt_reference_data,
-    plan_ppt_clarifications,
-    ppt_to_docx_bytes,
-    slug_filename,
-)
-from ui.evidence import build_evidence_markdown, clear_evidence_sidebar, set_evidence_sidebar
-from chat_utils.text_utils import context_token_report, estimate_tokens, trim_history_to_fit
-import re
-from services.graph import chatbot_graph
+from services.tools import TOOLS_SCHEMA, execute_tool, continue_ppt_generation
+from services.ppt_generation import ppt_to_docx_bytes, slug_filename, HAS_DOCX
+from ui.evidence import set_evidence_sidebar
 
-# Función auxiliar para resolver nombre/NIF de empresa
-def _empresa_lookup(intent: Dict[str, Any], router_state: Dict[str, Any]) -> str:
-    """Intenta obtener el mejor string de búsqueda para una empresa."""
-    # 1. Prioridad: NIF explícito
-    if intent.get("empresa_nif"):
-        return intent["empresa_nif"]
-    
-    # 2. Prioridad: Nombre explícito en la query
-    if intent.get("empresa_query"):
-        return intent["empresa_query"]
-        
-    # 3. Contexto previo (estado del router)
-    if router_state.get("last_empresa_nif"):
-        return router_state["last_empresa_nif"]
-    if router_state.get("last_empresa_query"):
-        return router_state["last_empresa_query"]
-        
-    return ""
 
-# Función auxiliar para generar cabecera de contexto de empresa
-def _empresa_context_header(empresa_query: str, nif_found: str) -> str:
-    """Genera una cabecera de texto para el contexto del LLM."""
-    if nif_found:
-        return f"Focus: EMPRESA (Query: '{empresa_query}', NIF: {nif_found})"
-    return f"Focus: EMPRESA (Query: '{empresa_query}')"
+SYSTEM_PROMPT = """Eres un asistente experto en licitaciones y contratación pública de la Diputación de Huelva.
 
-# Función auxiliar para normalizar claves de contratos (por si vienen con nombres distintos)
-def _normalize_contrato_keys(contratos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Asegura que todos los contratos tengan campo 'abstract'."""
-    out: List[Dict[str, Any]] = []
-    for c in contratos or []:
-        if not isinstance(c, dict):
-            continue
-        c2 = dict(c)
-        # Algunos resultados antiguos usan 'resumen' en lugar de 'abstract'
-        if "abstract" not in c2 and "resumen" in c2:
-            c2["abstract"] = c2.get("resumen") or ""
-        out.append(c2)
-    return out
+Tienes acceso a herramientas para:
+- Buscar contratos y licitaciones (search_contracts)
+- Obtener datos de empresas (search_company)  
+- Consultar detalles de un contrato específico (get_contract_details) -> Incluye normativas, solvencia y extractos del pliego.
+- Hacer consultas avanzadas (query_database)
+- Generar documentos técnicos (generate_document)
 
-# --- FUNCIÓN PRINCIPAL DEL PROCESO ---
+REGLAS:
+1. Usa las herramientas cuando sea apropiado.
+2. Si el usuario pide generar un documento (pliego, PPT), USA LA HERRAMIENTA generate_document. NO preguntes detalles al usuario tú mismo; la herramienta lo hará si es necesario.
+3. Responde siempre en español.
+5. SOLO puedes generar documentos tipo "Pliego de Prescripciones Técnicas" (PPT). Si el usuario pide generar Excel, PDF, informes o cartas, responde que no tienes esa función, pero que puedes mostrarle los datos en pantalla.
+
+REGLAS DE INTERACCIÓN:
+6. NO preguntes constantemente "¿Deseas que genere un PPT?". Solo ofrécelo si el usuario muestra una intención clara de querer documentar la información o si la respuesta es muy técnica y extensa.
+7. Sé directo en tus respuestas. Evita muletillas repetitivas al final.
+
+REGLAS ANTI-ALUCINACIÓN (MUY IMPORTANTE):
+6. NUNCA inventes datos que no hayas recibido de las herramientas. Si no sabes algo, di "No tengo esa información en el contexto actual" y ofrece hacer una nueva consulta.
+7. Si te muestran una tabla con 10 filas, NO RELLENES las filas restantes. Solo comenta sobre los datos que tienes.
+8. Los importes, expedientes, títulos y adjudicatarios DEBEN venir literalmente de los datos de la herramienta. NUNCA los inventes.
+9. Si el usuario pregunta por un dato específico que no está en tu contexto, usa la herramienta apropiada para buscarlo. NO lo adivines.
+10. PROACTIVIDAD: Si el usuario te pide información que no tienes, BUSCA AUTOMÁTICAMENTE usando las herramientas disponibles. NO preguntes "¿Desea que realice una consulta?" - simplemente hazla.
+11. NUNCA inventes listados de leyes o normativas con años futuros (ej: "Ley 1/2030"). Si no conoces la normativa específica, di "No dispongo de la normativa específica en este momento" y ofrece buscar en el pliego usando get_contract_details.
+"""
+
+
 async def orchestrate_message(question: str):
     """
-    Gestiona el flujo completo de un mensaje de usuario.
+    Procesa un mensaje con loop controlado de herramientas.
     """
-    # 1. RECUPERAR ESTADO DE LA SESIÓN
-    history: List[Dict[str, str]] = cl.user_session.get("history", [])
-    router_state: Dict[str, Any] = cl.user_session.get(
-        "router_state",
-        {
-            "last_focus": None,
-            "last_empresa_query": None,
-            "last_empresa_nif": None,
-            "last_contratos": [],
-            "last_capitulos": [],
-            "last_extractos": [],
-            "last_doc_tipo": None,
-            "last_extracto_tipos": None,
-        },
-    )
-
-    # Añadimos estado del PPT al router para que el grafo sepa si estamos generando uno
-    router_state["ppt_pending"] = cl.user_session.get("ppt_pending", False)
-    router_state["ppt_request_base"] = cl.user_session.get("ppt_request_base", "")
-
-    # Mensaje temporal de "Pensando..."
-    thinking_msg = await cl.Message(content="Detectando intención...").send()
-
-    # Estado Inicial para el Grafo
-    initial_state = {
-        "question": question,
-        "history": history,
-        "router_state": router_state,
-        "thinking_message_id": thinking_msg.id,
-        "intent": None,
-        "answer": None,
-        "error": None,
-        "sidebar_title": None,
-        "sidebar_md": None,
-        "sidebar_props": None,
-        "follow_ups": None,
-        "element_to_send": None,
-        "answer_prompt": None,
-        "ppt_generation_input": None
-    }
-
-    try:
-        # 2. EJECUTAR EL GRAFO (LÓGICA INTELIGENTE)
-        # Aquí es donde LangGraph toma el control y decide qué nodos ejecutar.
-        final_state = await chatbot_graph.ainvoke(initial_state)
+    # 1. Recuperar estado
+    history = cl.user_session.get("history", [])
+    session_state = cl.user_session.get("session_state", {})
+    
+    # 2. Verificar si hay PPT pendiente
+    if session_state.get("ppt_pending"):
+        await handle_ppt_followup(question, session_state)
+        return
+    
+    # 3. Construir mensajes
+    messages = build_messages(history, question)
+    
+    # 4. Loop de pensamiento (hasta 3 interacciones)
+    MAX_LOOPS = 3
+    for _ in range(MAX_LOOPS):
+        # STREAMING EXECUTION
+        msg = cl.Message(content="")
         
-        # Si el grafo reporta error, lo mostramos y paramos.
-        if final_state.get("error"):
-            thinking_msg.content = f"Error: {final_state['error']}"
-            await thinking_msg.update()
+        # Necesitamos la clase para reconstruir el objeto (o un mock compatible)
+        from openai.types.chat.chat_completion_message import ChatCompletionMessage
+        from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
+        
+        stream = await cl.make_async(llm_client.chat.completions.create)(
+            model=config.LLM_MODEL,
+            messages=messages,
+            tools=TOOLS_SCHEMA,
+            tool_choice="auto",
+            temperature=0.2,
+            frequency_penalty=0.5,
+            stream=True
+        )
+        
+        full_content = ""
+        tool_calls_data = [] # Lista de dicts para ir construyendo
+        
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+            
+            # 1. Streaming de texto normal
+            if delta.content:
+                if not msg.id:
+                    await msg.send()
+                full_content += delta.content
+                await msg.stream_token(delta.content)
+            
+            # 2. Reconstrucción de Tool Calls
+            if delta.tool_calls:
+                for tc_chunk in delta.tool_calls:
+                    index = tc_chunk.index
+                    
+                    # Asegurar tamaño de la lista
+                    while len(tool_calls_data) <= index:
+                        tool_calls_data.append({
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""}
+                        })
+                    
+                    tc = tool_calls_data[index]
+                    
+                    if tc_chunk.id:
+                        tc["id"] += tc_chunk.id
+                    
+                    if tc_chunk.function:
+                        if tc_chunk.function.name:
+                            tc["function"]["name"] += tc_chunk.function.name
+                        if tc_chunk.function.arguments:
+                            tc["function"]["arguments"] += tc_chunk.function.arguments
+        
+        if msg.id:
+            await msg.update()
+        
+        # Reconstruir el objeto assistant_msg para compatibilidad con el resto del código
+        tool_calls_objects = []
+        for tc in tool_calls_data:
+            tool_calls_objects.append(
+                ChatCompletionMessageToolCall(
+                    id=tc["id"],
+                    type="function",
+                    function=Function(name=tc["function"]["name"], arguments=tc["function"]["arguments"])
+                )
+            )
+            
+        assistant_msg = ChatCompletionMessage(
+            role="assistant",
+            content=full_content if full_content else None,
+            tool_calls=tool_calls_objects if tool_calls_objects else None
+        )
+        
+        # SI NO HAY HERRAMIENTAS -> Respuesta final (ya se streameó)
+        if not assistant_msg.tool_calls:
+            # Ya se hizo stream arriba, solo actualizar historial
+            update_history(history, question, full_content)
+            await generate_suggestions(question, full_content, {})
             return
 
-        # 3. ACTUALIZAR INTERFAZ (SIDEBAR)
-        # Si el grafo generó evidencias (fuentes), las mostramos a la izquierda.
-        if final_state.get("sidebar_md"):
-            await set_evidence_sidebar(
-                title=final_state["sidebar_title"] or "Evidencias",
-                markdown=final_state["sidebar_md"],
-                props_extra=final_state["sidebar_props"],
-                context_text=final_state.get("answer_prompt", {}).get("user") if final_state.get("answer_prompt") else None
-            )
-
-        answer = ""
-        # Actualizamos historial local (memoria a corto plazo)
-        current_history = final_state.get("history", [])
-        current_history.append({"role": "user", "content": question})
-
-        # 4. GENERAR RESPUESTA AL USUARIO
+        # SI HAY HERRAMIENTAS -> Ejecutar y seguir
+        messages.append(assistant_msg) # Añadimos la intención de llamar a la history
         
-        # CASO A: RESPUESTA GENERADA (RAG)
-        if final_state.get("answer_prompt"):
-            thinking_msg.content = "Redactando respuesta..."
-            await thinking_msg.update()
-            
-            prompt = final_state["answer_prompt"]
-            messages_llm = [{"role": "system", "content": prompt["system"]}]
-            messages_llm.extend(prompt["history"])
-            messages_llm.append({"role": "user", "content": prompt["user"]})
-
-            reply = cl.Message(content="")
-            await reply.send()
-
-            # Streaming: enviamos la respuesta palabra por palabra
-            stream = llm_client.chat.completions.create(
-                model=config.LLM_MODEL,
-                messages=messages_llm,
-                temperature=0.2,
-                stream=True,
-                max_tokens=1200,
-            )
-
-            full_answer: List[str] = []
-            for chunk in stream:
-                token = getattr(chunk.choices[0].delta, 'content', '') or ""
-                if token:
-                    full_answer.append(token)
-                    await reply.stream_token(token)
-
-            await reply.update()
-            answer = "".join(full_answer).strip()
-            
-        # CASO B: GENERACIÓN DE PPT (Word)
-        elif final_state.get("ppt_generation_input"):
-            input_data = final_state["ppt_generation_input"]
-            thinking_msg.content = "Generando documento..."
-            await thinking_msg.update()
-            
-            msg = cl.Message(content="")
-            await msg.send()
-
-            stream = llm_client.chat.completions.create(
-                model=config.LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": input_data["system"]},
-                    {"role": "user", "content": input_data["user"]}
-                ],
-                max_tokens=8000,
-                temperature=0.2,
-                stream=True,
-            )
-
-            pliego_chunks: List[str] = []
-            for chunk in stream:
-                token = getattr(chunk.choices[0].delta, 'content', '') or ""
-                if token:
-                    pliego_chunks.append(token)
-                    await msg.stream_token(token)
-
-            await msg.update()
-            pliego_text = "".join(pliego_chunks).strip()
-            answer = pliego_text # Guardamos el texto generado en el historial
-            
-            # Exportar a archivo DOCX
-            ppt_title = "Pliego de Prescripciones Técnicas"
-            # Intentamos buscar un título en el Markdown (línea que empiece por #)
-            m = re.search(r"^#\s*(.+)$", pliego_text, flags=re.MULTILINE)
-            if m: ppt_title = m.group(1).strip()
-
-            if HAS_DOCX:
-                docx_bytes = ppt_to_docx_bytes(pliego_text, title=ppt_title)
-                file = cl.File(
-                    name=f"{slug_filename(ppt_title)}.docx",
-                    content=docx_bytes,
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
-                await cl.Message(content=f"Documento Word generado: **{ppt_title}**", elements=[file]).send()
-
-        # CASO C: RESPUESTA ESTÁTICA O PREDEFINIDA (Saludo, Cypher simple)
-        elif final_state.get("answer"):
-            answer = final_state["answer"]
-            # Si se necesita clarificar el PPT (el usuario no dio suficientes datos)
-            if final_state["intent"] and final_state["intent"].get("ppt_clarifications_needed"):
-                plan = final_state["intent"]["ppt_plan"]
-                # Guardamos estado "pendiente de PPT"
-                cl.user_session.set("ppt_pending", True)
-                cl.user_session.set("ppt_request_base", plan["normalized_request"])
-                cl.user_session.set("ppt_questions", plan["questions"])
-                cl.user_session.set("ppt_clarifications_sent", True)
-
-                qtxt = "\n".join([f"{i+1}. {q}" for i, q in enumerate(plan["questions"])])
-                msg_text = f"Antes de redactar el PPT necesito aclarar algunas cosas:\n\n{qtxt}\n\nRespóndeme en un solo mensaje."
-                await cl.Message(content=msg_text).send()
-                answer = msg_text
-            else:
-                await cl.Message(content=answer).send()
-
-        # 5. ACTUALIZAR MEMORIA Y SUGERENCIAS
-        
-        # Guardar respuesta del asistente en memoria
-        if answer:
-            answer_to_store = answer
-            # Si es muy larga, la resumimos para no llenar la memoria del contexto
-            if len(answer) > 3000:
-                 answer_to_store = await cl.make_async(summarize_for_memory)(answer, config.MEMORY_SUMMARY_TOKENS)
-
-            current_history.append({"role": "assistant", "content": answer_to_store})
-            cl.user_session.set("history", current_history[-config.MAX_HISTORY_TURNS:])
-
-        # Generar sugerencias (Follow-ups) si procede
-        intent_type = final_state["intent"].get("intent") if final_state.get("intent") else None
-        if intent_type in ["RAG_QA", "CYPHER_QA"] and answer:
-            contratos = final_state.get("contratos") or []
-            capitulos = final_state.get("capitulos") or []
-            extractos = final_state.get("extractos") or []
-            
-            if should_generate_followups(answer, contratos, capitulos, extractos) or intent_type == "CYPHER_QA":
-                suggestions = await cl.make_async(generate_follow_up_questions)(question, answer, 3)
-                if suggestions:
-                    actions = []
-                    for s in suggestions:
-                        label = s if len(s) <= config.SUGGESTION_LABEL_MAX_CHARS else s[: config.SUGGESTION_LABEL_MAX_CHARS - 1] + "…"
-                        actions.append(cl.Action(name="follow_up_question", label=label, tooltip=s, payload={"question": s}, icon="sparkles"))
-                    await cl.Message(content="Sugerencias:", actions=actions).send()
-
-        # Guardar nuevo estado del Router
-        new_router_state = final_state["router_state"]
-        cl.user_session.set("router_state", new_router_state)
-        
-        # Sincronizar variables individuales clave
-        cl.user_session.set("ppt_pending", new_router_state.get("ppt_pending", False))
-        cl.user_session.set("ppt_request_base", new_router_state.get("ppt_request_base", ""))
-        
-        thinking_msg.content = "Respuesta generada vía LangGraph."
-        await thinking_msg.update()
-
-        # 6. SINCRONIZACIÓN MANUAL DE PERSISTENCIA (Base de Datos)
-        # Esto asegura que el historial se guarda en SQLite incluso si la integración automática falla.
-        if cl.data_layer and cl.context.session.thread_id:
+        for tool_call in assistant_msg.tool_calls:
+            tool_name = tool_call.function.name
             try:
-                user = cl.user_session.get("user")
-                user_id = getattr(user, "id", None) if user else None
+                tool_args = json.loads(tool_call.function.arguments)
+            except:
+                tool_args = {}
+            
+            print(f"--- [ORCHESTRATOR] Loop Tool: {tool_name} Args: {tool_args} ---")
+            
+            # Ejecutar herramienta con feedback visual (Step)
+            async with cl.Step(name=tool_name, type="tool") as step:
+                step.input = json.dumps(tool_args, indent=2, ensure_ascii=False)
                 
-                # [FIX] Si el usuario en sesión no tiene ID, lo buscamos en BD
-                if user and not user_id and getattr(user, "identifier", None):
-                    persisted_user = await cl.data_layer.get_user(user.identifier)
-                    if persisted_user:
-                        user_id = persisted_user.id
+                tool_result = await cl.make_async(execute_tool)(tool_name, tool_args, session_state)
                 
-                # Actualizamos el Hilo (Thread) con el nombre y usuario correctos
-                await cl.data_layer.update_thread(
-                    thread_id=cl.context.session.thread_id,
-                    name=question[:50] if len(current_history) <= 2 else None,
-                    user_id=user_id
-                )
-                print(f"--- [SYNC] Hilo {cl.context.session.thread_id} actualizado manualmente ---")
-
-                # Guardamos el mensaje del USUARIO
-                import uuid
-                from datetime import datetime
+                # Mostrar output truncado en el paso
+                step.output = tool_result["content"][:800] + "..." if len(tool_result["content"]) > 800 else tool_result["content"]
                 
-                step_user = {
-                    "id": str(uuid.uuid4()),
-                    "threadId": cl.context.session.thread_id,
-                    "name": "User",
-                    "type": "user_message",
-                    "output": question,
-                    "createdAt": datetime.utcnow().isoformat() + "Z"
-                }
-                await cl.data_layer.create_step(step_user)
-                # print(f"--- [SYNC] Mensaje usuario guardado ---")
+                # Mostrar sidebar si hay
+                if tool_result.get("sidebar"):
+                    sb = tool_result["sidebar"]
+                    # Forzamos sidebar update
+                    await set_evidence_sidebar(sb["title"], sb["md"])
+            
+            # Visualizar Dataframe (Tablas)
+            if tool_result.get("dataframe"):
+                await cl.Message(
+                    content="📊 **Datos extraídos:**", 
+                    elements=[tool_result["dataframe"]]
+                ).send()
+            
+            # Guardar estado por si acaso
+            cl.user_session.set("session_state", session_state)
+            
+            # Casos especiales de interrupción (PPT)
+            if tool_result.get("needs_clarification"):
+                await handle_ppt_clarification(tool_result)
+                return
+            
+            if tool_result.get("ppt_prompts"):
+                sb = tool_result.get("sidebar")
+                await generate_ppt_streaming(tool_result, question, history, sidebar_data=sb)
+                return
 
-                # Guardamos la respuesta del ASISTENTE
-                if answer:
-                    step_ai = {
-                        "id": str(uuid.uuid4()),
-                        "threadId": cl.context.session.thread_id,
-                        "name": "Asistente",
-                        "type": "assistant_message",
-                        "output": answer,
-                        "createdAt": datetime.utcnow().isoformat() + "Z"
-                    }
-                    await cl.data_layer.create_step(step_ai)
-                    # print(f"--- [SYNC] Mensaje asistente guardado ---")
+            # Añadir resultado para la siguiente vuelta del LLM
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": tool_result["content"]
+            })
+            
+    # Si salimos del loop por límite (despues de 3 vueltas sin respuesta final)
+    # Forzamos una respuesta con lo que tengamos
+    await stream_final_response(messages, question, history, {})
 
-            except Exception as e:
-                print(f"--- [ERROR SYNC] Fallo al guardar historial: {e} ---")
 
+def build_messages(history: List[Dict], question: str) -> List[Dict]:
+    """Construye lista de mensajes para el LLM."""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    
+    # Añadir historial (últimos turnos)
+    for turn in history[-10:]:
+        messages.append({"role": turn["role"], "content": turn["content"]})
+    
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
+async def stream_final_response(messages: List[Dict], question: str, history: List, tool_result: Dict):
+    """Genera respuesta final con streaming."""
+    msg = cl.Message(content="")
+    await msg.send()
+    
+    stream = await cl.make_async(llm_client.chat.completions.create)(
+        model=config.LLM_MODEL,
+        messages=messages,
+        temperature=0.2,
+        stream=True,
+        max_tokens=1500
+    )
+    
+    chunks = []
+    for chunk in stream:
+        token = getattr(chunk.choices[0].delta, 'content', '') or ""
+        if token:
+            chunks.append(token)
+            await msg.stream_token(token)
+    
+    await msg.update()
+    answer = "".join(chunks)
+    
+    update_history(history, question, answer)
+    
+    # Sugerencias
+    await generate_suggestions(question, answer, tool_result)
+
+
+async def handle_ppt_clarification(tool_result: Dict):
+    """Muestra preguntas de clarificación para PPT."""
+    questions = tool_result.get("questions", [])
+    q_text = "\n".join([f"{i+1}. {q}" for i, q in enumerate(questions)])
+    
+    msg_content = f"Para generar el documento necesito algunos detalles:\n\n{q_text}\n\nResponde en un solo mensaje."
+    await cl.Message(content=msg_content).send()
+
+
+async def handle_ppt_followup(user_response: str, session_state: Dict):
+    """Continúa generación de PPT después de clarificaciones."""
+    tool_result = await cl.make_async(continue_ppt_generation)(user_response, session_state)
+    
+    cl.user_session.set("session_state", session_state)
+    
+    if tool_result.get("ppt_prompts"):
+        history = cl.user_session.get("history", [])
+        # Pasamos sidebar para que se adjunte al mensaje de generación
+        sb = tool_result.get("sidebar")
+        await generate_ppt_streaming(tool_result, user_response, history, sidebar_data=sb)
+    else:
+        await cl.Message(content=tool_result.get("content", "Error generando PPT")).send()
+
+
+async def generate_ppt_streaming(tool_result: Dict, question: str, history: List, sidebar_data: Dict = None):
+    """Genera PPT con streaming y archivo DOCX."""
+    prompts = tool_result["ppt_prompts"]
+    
+    # 1. Enviar evidencia en un mensaje separado primero para asegurar visibilidad
+    if sidebar_data:
+        ref_element = cl.Text(name=sidebar_data["title"], content=sidebar_data["md"], display="side")
+        await cl.Message(
+            content=f"📄 **Referencia detectada:** Se utilizará la estructura del contrato **{sidebar_data['title']}**.",
+            elements=[ref_element]
+        ).send()
+
+    # 2. Iniciar generación
+    msg = cl.Message(content="⏳ **Redactando documento...**")
+    await msg.send()
+    
+    stream = await cl.make_async(llm_client.chat.completions.create)(
+        model=config.LLM_MODEL,
+        messages=[
+            {"role": "system", "content": prompts["system"]},
+            {"role": "user", "content": prompts["user"]}
+        ],
+        temperature=0.2,
+        frequency_penalty=0.1,
+        stream=True,
+        max_tokens=5000
+    )
+    
+    chunks = []
+    for chunk in stream:
+        token = getattr(chunk.choices[0].delta, 'content', '') or ""
+        if token:
+            chunks.append(token)
+            await msg.stream_token(token)
+    
+    await msg.update()
+    ppt_text = "".join(chunks)
+    
+    # Generar DOCX
+    ppt_title = "Pliego de Prescripciones Técnicas"
+    m = re.search(r"^#\s*(.+)$", ppt_text, flags=re.MULTILINE)
+    if m:
+        ppt_title = m.group(1).strip()
+    
+    if HAS_DOCX:
+        docx_bytes = ppt_to_docx_bytes(ppt_text, title=ppt_title)
+        file = cl.File(
+            name=f"{slug_filename(ppt_title)}.docx",
+            content=docx_bytes,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        await cl.Message(content=f"📄 Documento generado: **{ppt_title}**", elements=[file]).send()
+    
+    update_history(history, question, f"[Documento generado: {ppt_title}]")
+
+
+async def generate_suggestions(question: str, answer: str, tool_result: Dict):
+    """Genera sugerencias de follow-up."""
+    if len(answer) < 100:
+        return
+    
+    # Importamos aquí para evitar circular
+    from services.followups import generate_follow_up_questions
+    
+    try:
+        suggestions = await cl.make_async(generate_follow_up_questions)(question, answer, 3)
+        if suggestions:
+            actions = []
+            for s in suggestions:
+                label = s if len(s) <= config.SUGGESTION_LABEL_MAX_CHARS else s[:config.SUGGESTION_LABEL_MAX_CHARS-1] + "…"
+                actions.append(cl.Action(
+                    name="follow_up",
+                    label=label,
+                    tooltip=s,
+                    payload={"question": s}
+                ))
+            await cl.Message(content="💡 Sugerencias:", actions=actions).send()
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"[ERROR LangGraph] {e}")
-        thinking_msg.content = f"Error en el flujo del grafo: {e}"
-        await thinking_msg.update()
+        print(f"[WARN] Error generando sugerencias: {e}")
+
+
+def update_history(history: List, question: str, answer: str):
+    """Actualiza historial de conversación."""
+    history.append({"role": "user", "content": question})
+    history.append({"role": "assistant", "content": answer})
+    cl.user_session.set("history", history[-config.MAX_HISTORY_TURNS:])

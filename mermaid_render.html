@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mermaid Render</title>
+    <style>
+        body { background-color: white; padding: 20px; font-family: sans-serif; }
+        #diagram { max-width: 1000px; }
+    </style>
+</head>
+<body>
+    <div class="mermaid" id="diagram">
+graph TD
+    User((Usuario)) -->|Mensaje| UI["Chainlit UI<br/>(app.py)"]
+    UI -->|on_message| Orch["Orquestador<br/>(orchestrator.py)"]
+    
+    subgraph "Bucle de Razonamiento (Agent Loop)"
+        Orch -->|Historial + Prompt| LLM_Router["LLM (Qwen/OpenAI-API)<br/>Router"]
+        LLM_Router -->|Decision: Tool Call| ToolExec["Ejecutor de Herramientas<br/>(tools.py)"]
+        LLM_Router -->|Decision: Respuesta Final| UI
+    end
+    
+    ToolExec -->|Search/RAG| Neo4jQueries["Neo4j Queries<br/>(neo4j_queries.py)"]
+    ToolExec -->|Analytics| CypherGen["Generador Cypher<br/>(cypher.py)"]
+    ToolExec -->|Docs| PPTGen["Generador PPT<br/>(ppt_generation.py)"]
+    
+    Neo4jQueries -->|Cypher| DB[("Neo4j Graph DB")]
+    CypherGen -->|Cypher| DB
+    PPTGen -->|RAG Context| Neo4jQueries
+    
+    ToolExec -->|Resultado| Orch
+    </div>
+
+    <!-- Load Mermaid -->
+    <script type="module">
+      import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+      mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>

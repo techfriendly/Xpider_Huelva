@@ -21,6 +21,23 @@ from chat_utils.json_utils import safe_json_loads
 from chat_utils.prompt_loader import load_prompt
 
 
+def clean_keys(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Reemplaza puntos en las claves por guiones bajos para evitar problemas en UIs."""
+    if not rows:
+        return rows
+    new_rows = []
+    for r in rows:
+        new_row = {}
+        for k, v in r.items():
+            new_key = k.replace(".", "_")
+            new_row[new_key] = v
+        new_rows.append(new_row)
+    return new_rows
+
+
+# Palabras prohibidas para evitar inyección de código que modifique la BD
+
+
 # Palabras prohibidas para evitar inyección de código que modifique la BD
 WRITE_KEYWORDS = re.compile(
     r"\b(CREATE|MERGE|SET|DELETE|DETACH|DROP|LOAD\s+CSV|CALL\s+apoc\.|CALL\s+dbms)\b",
@@ -55,14 +72,48 @@ def cypher_needs_r_binding(cypher: str) -> bool:
 
 
 def get_schema_hint(max_chars: int = 7000) -> str:
-    """Obtiene el esquema visual de la BD para dárselo al LLM como pista."""
-    try:
-        rows = neo4j_query("CALL db.schema.visualization()")
-        if rows:
-            return json.dumps(rows[0], ensure_ascii=False)[:max_chars]
-    except Exception:
-        pass
-    return "N/D"
+    """Provee el esquema del grafo para el LLM."""
+    # Retornamos un esquema curado y explícito para mejorar la precisión
+    return """
+    NODOS:
+    - :ContratoRAG (Representa un contrato/licitación)
+      Propiedades: expediente (str), titulo (str), valor_estimado (float), presupuesto_sin_iva (float), cpv_principal (str), contract_uri (str)
+    
+    - :EmpresaRAG (Representa una empresa adjudicataria)
+      Propiedades: nombre (str), nif (str)
+      
+    RELACIONES:
+    - (:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(:ContratoRAG)
+      Propiedades de la relación 'r': 
+        - importe_adjudicado (float): El importe real por el que se ganó el contrato.
+        
+    NOTA IMPORTANTE:
+    - Para "importe adjudicado" o "importe contratado", USA SIEMPRE `r.importe_adjudicado` en la relación.
+    - Para "facturación", suma `r.importe_adjudicado`.
+    - Para "valor estimado" o presupuesto base, usa `c.valor_estimado` o `c.presupuesto_sin_iva` en el nodo ContratoRAG.
+    
+    ATENCIÓN DIRECCIÓN:
+    La relación es UNIDIRECCIONAL: (:EmpresaRAG)-[:ADJUDICATARIA_RAG]->(:ContratoRAG).
+    SIEMPRE usa (e:EmpresaRAG)-[r:ADJUDICATARIA_RAG]->(c:ContratoRAG).
+    NUNCA uses (c:ContratoRAG)-[:ADJUDICATARIA_RAG]->(e:EmpresaRAG) porque devolverá 0 resultados.
+    
+    DUPLICADOS:
+    - Si buscas un LISTADO de contratos (top, búsqueda, etc.), usa SIEMPRE `DISTINCT c.expediente` (o `c.contract_id`) en el RETURN.
+      Ej: `RETURN DISTINCT c.expediente, c.titulo, r.importe_adjudicado...`
+      Esto evita que el contrato salga repetido si tiene múltiples empresas en UTE.
+      
+    FILTRADO POR TIPO (CPV):
+    - IMPORTANTE: `cpv_principal` puede ser INT o STRING. Usa SIEMPRE `toString(c.cpv_principal)` para comparar.
+    - OBRAS: `toString(c.cpv_principal) STARTS WITH '45'`
+    - SUMINISTROS: `toString(c.cpv_principal) < '45'` (comparación lexicográfica funciona bien sobre strings)
+    - SERVICIOS: `toString(c.cpv_principal) >= '50'`
+    
+    FILTRADO POR FECHA / AÑO:
+    - NO EXISTE campo fecha.
+    - El año suele estar al inicio del expediente.
+    - Para "año 2024": `WHERE c.expediente STARTS WITH '24' OR c.expediente STARTS WITH '2024'`
+    - Para "año 2023": `WHERE c.expediente STARTS WITH '23' OR c.expediente STARTS WITH '2023'`
+    """
 
 
 def _wants_raw_json(question: str) -> bool:
@@ -119,7 +170,7 @@ def _format_value(key: str, v: Any) -> str:
     return s.replace("|", r"\|")
 
 
-def rows_to_markdown(rows: Any, max_rows: int = 25, max_cols: int = 8) -> str:
+def rows_to_markdown(rows: Any, max_rows: int = 100, max_cols: int = 8) -> str:
     """Convierte resultados de la BD (Lista de diccionarios) en una Tabla Markdown."""
     if rows is None:
         return "No se han devuelto filas."
@@ -225,6 +276,7 @@ def cypher_qa(question: str) -> Dict[str, Any]:
     try:
         print(f"--- [EXEC CYPHER] Ejecutando: {cypher} | Params: {params} ---")
         rows = neo4j_query(cypher, params)
+        rows = clean_keys(rows)  # Sanear claves para UI/DataFrame
         print(f"--- [EXEC CYPHER] Filas: {len(rows) if rows else 0} ---")
     except Exception as e:
         err = str(e)
@@ -241,6 +293,7 @@ def cypher_qa(question: str) -> Dict[str, Any]:
         try:
             print(f"--- [REINTENTO CYPHER] Ejecutando: {cypher2} ---")
             rows = neo4j_query(cypher2, params2)
+            rows = clean_keys(rows)  # Sanear claves para UI/DataFrame
             cypher = cypher2         # Actualizamos variables para devolver la query correcta
             params = params2
             plan = plan2
@@ -249,33 +302,47 @@ def cypher_qa(question: str) -> Dict[str, Any]:
 
     # DEVOLUCIÓN DE RESPUESTA
     
+    # Preparamos Sidebar Evidence (Query usada)
+    sidebar_md = f"### Consulta Generada (Cypher)\n```cypher\n{cypher}\n```\n**Params:** `{json.dumps(params)}`\n"
+
     # Si piden JSON, devolvemos JSON
     if _wants_raw_json(question):
         answer = json.dumps(rows, ensure_ascii=False, indent=2)
-        return {"answer": answer, "cypher": cypher, "rows": rows, "plan": plan}
+        return {"answer": answer, "cypher": cypher, "rows": rows, "plan": plan, "sidebar_md": sidebar_md}
 
-    # Generamos tabla Markdown
-    table_md = rows_to_markdown(rows, max_rows=25)
+    # Generamos tabla Markdown para el contexto del LLM
+    # LIMITACIÓN: Solo pasamos las 10 primeras filas al LLM para evitar alucinaciones
+    rows_for_context = rows[:10] if len(rows) > 10 else rows
+    table_md = rows_to_markdown(rows_for_context, max_rows=10)
 
-    # Intentamos que el LLM explique los resultados en lenguaje natural
-    system_msg = load_prompt("cypher_response_system")
-    user_msg = load_prompt(
-        "cypher_response_user",
-        question=question,
-        cypher=cypher,
-        rows_json=json.dumps(rows, ensure_ascii=False)
-    )
+    # OPTIMIZACIÓN: Si hay muchas filas (>15), no pedimos al LLM que las explique
+    # Le damos un resumen estructurado con los datos reales (primeras 10 filas)
+    if len(rows) > 15:
+        answer = f"Se han encontrado **{len(rows)} resultados** en la base de datos.\n\n"
+        answer += f"**DATOS EN CONTEXTO (primeras 10 filas):**\n\n{table_md}\n\n"
+        answer += f"⚠️ **Solo las 10 primeras filas están en mi memoria/contexto.** "
+        answer += f"El usuario puede ver las {len(rows)} filas completas en la tabla interactiva de arriba. "
+        answer += f"Para preguntas sobre filas específicas fuera de estas 10, haré una nueva consulta."
+    else:
+        # Para pocas filas, que el LLM las explique
+        system_msg = load_prompt("cypher_response_system")
+        user_msg = load_prompt(
+            "cypher_response_user",
+            question=question,
+            cypher=cypher,
+            rows_json=json.dumps(rows, ensure_ascii=False)
+        )
 
-    resp = llm_client.chat.completions.create(
-        model=config.LLM_MODEL,
-        messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
-        temperature=0.2,
-        max_tokens=600,
-    )
+        resp = llm_client.chat.completions.create(
+            model=config.LLM_MODEL,
+            messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
+            temperature=0.2,
+            max_tokens=600,
+        )
 
-    answer = (resp.choices[0].message.content or "").strip()
-    if not answer:
-        answer = table_md
+        answer = (resp.choices[0].message.content or "").strip()
+        if not answer:
+            answer = table_md
 
     # Fallback: Si el LLM devuelve JSON en vez de explicarlo, mostramos la tabla que se entiende mejor.
     looks_like_json = False
@@ -289,4 +356,4 @@ def cypher_qa(question: str) -> Dict[str, Any]:
     if looks_like_json:
         answer = table_md
 
-    return {"answer": answer, "cypher": cypher, "rows": rows, "plan": plan}
+    return {"answer": answer, "cypher": cypher, "rows": rows, "plan": plan, "sidebar_md": sidebar_md}

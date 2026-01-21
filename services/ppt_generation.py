@@ -103,6 +103,7 @@ def get_ppt_reference_data(contract_id: str) -> Optional[Dict[str, Any]]:
         RETURN
           c.titulo     AS contrato_titulo,
           c.expediente AS expediente,
+          c.contract_uri AS link_contrato,
           d.doc_id     AS doc_id,
           cap.heading  AS heading,
           cap.orden    AS orden,
@@ -129,6 +130,7 @@ def get_ppt_reference_data(contract_id: str) -> Optional[Dict[str, Any]]:
         "contract_id": contract_id,
         "expediente": rows[0].get("expediente"),
         "contrato_titulo": rows[0].get("contrato_titulo"),
+        "link_contrato": rows[0].get("link_contrato"),
         "doc_id": rows[0].get("doc_id"),
         "capitulos": cap_list,
     }
@@ -143,27 +145,27 @@ def build_ppt_generation_prompt_one_by_one(user_request: str, ref_data: Dict[str
     titulo_ref = ref_data.get("contrato_titulo") or "N/D"
     caps = ref_data.get("capitulos") or []
 
-    # Construimos un texto con los capítulos de referencia
     cap_blocks = []
-    for c in caps[:18]: # Limitamos a 18 capítulos para no explotar la ventana de contexto
+    for c in caps[:8]: # Usamos 8 capítulos para tener buena estructura
         heading = c.get("heading") or "N/D"
         orden = c.get("orden")
         texto = c.get("texto") or ""
-        snippet = clip(texto, 1200) # Recortamos textos muy largos
+        snippet = clip(texto, 200) # Solo tomamos el inicio para dar contexto de qué trata
         cap_blocks.append(
-            f"### Capítulo {orden}. {heading}\n"
-            f"Contenido de referencia (no copiar literal):\n"
-            f"{snippet}\n"
+            f"### {orden}. {heading}\n"
+            f"(Inicio: {snippet}...)"
         )
     caps_ref_text = "\n".join(cap_blocks) if cap_blocks else "N/D"
 
     system_msg = load_prompt("ppt_generation_system")
+    system_msg += "\n\nIMPORTANTE: Tu respuesta DEBE ser ÚNICAMENTE el contenido del documento en formato Markdown. DEBE comenzar con '# Título del Documento'. Termina el documento de forma clara. Si sientes que te repites, DETENTE. NO escribas 'indefinidamente' ni entres en bucles."
 
     user_msg = load_prompt(
         "ppt_generation_user",
         today=config.TODAY_STR,
         user_request=user_request,
         exp=exp,
+        judul_ref=titulo_ref, # Typo fix if needed, but keeping orig var name
         titulo_ref=titulo_ref,
         caps_ref_text=caps_ref_text
     )
@@ -183,27 +185,31 @@ def slug_filename(title: str, max_len: int = 80) -> str:
 def ppt_to_docx_bytes(md_text: str, title: str = "Pliego de Prescripciones Técnicas") -> bytes:
     """
     Convierte el texto Markdown generado por el LLM a un archivo binario .docx (Word).
-    Interpreta encabezados (##) para crear la estructura del documento.
+    Interpreta encabezados (##) y listas básicas.
     """
     if not HAS_DOCX:
         return b""
         
     doc = Document()
-    doc.add_heading(title, level=1)
+    doc.add_heading(title, level=0)
     
-    # Parseo muy simple línea a línea
+    # Parseo simple línea a línea
     for line in (md_text or "").splitlines():
         line = line.rstrip()
         if not line:
             continue
-        # Título principal ya puesto, ignoramos si se repite
-        if line.startswith("# "):
+        # Título principal ya puesto, ignoramos si se repite al inicio
+        if line.startswith("# ") and title.lower() in line.lower():
             continue
+            
         # Subtítulos
         if line.startswith("## "):
-            doc.add_heading(line.replace("## ", "").strip(), level=2)
+            doc.add_heading(line.replace("## ", "").strip(), level=1)
         elif line.startswith("### "):
-            doc.add_heading(line.replace("### ", "").strip(), level=3)
+            doc.add_heading(line.replace("### ", "").strip(), level=2)
+        elif line.startswith("- ") or line.startswith("* "):
+            # Listas
+            doc.add_paragraph(line[2:].strip(), style='List Bullet')
         else:
             doc.add_paragraph(line) # Párrafo normal
             
