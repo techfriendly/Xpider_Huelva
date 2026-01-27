@@ -93,6 +93,7 @@ pip install -r requirements.txt
 - `chainlit` - Framework de UI conversacional
 - `openai` - Cliente para APIs compatibles
 - `neo4j` - Driver oficial de Neo4j
+- `pandas` - Manipulación de datos y tablas
 - `python-docx` - Generación de documentos Word
 
 ### 4. Preparar Neo4j

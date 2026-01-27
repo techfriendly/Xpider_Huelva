@@ -10,7 +10,7 @@ El sistema es una aplicación **RAG (Retrieval-Augmented Generation)** orquestad
 
 | Componente | Archivo Principal | Responsabilidad |
 | :--- | :--- | :--- |
-| **Frontend UI** | `app.py` | Interfaz de chat basada en **Chainlit**. Gestiona sesiones, subida de archivos y renderizado de mensajes. |
+| **Frontend UI** | `app.py` | Interfaz de chat basada en **Chainlit**. Gestiona sesiones, assets (`public/`) y scripts personalizados (`force_scroll.js`). |
 | **Orquestador** | `services/orchestrator.py` | El "cerebro". Gestiona el bucle de conversación, mantiene el historial y decide qué herramientas invocar usando el LLM. |
 | **Herramientas** | `services/tools.py` | Implementación de las funciones ejecutables (buscar contratos, generar PPT, etc.). Actúa como puente entre el LLM y los servicios de datos. |
 | **Capa de Datos** | `services/neo4j_queries.py` | Consultas Cypher pre-optimizadas para leer del grafo (Búsqueda vectorial + Búsqueda exacta). |
@@ -54,6 +54,7 @@ Flujo especializado para crear Pliegos de Prescripciones Técnicas:
 *   **LLM Backend**: Modelos compatibles con OpenAI API (actualmente **Qwen3-A30-3B**).
 *   **Embeddings**: Modelo **qwen-0.6-embedding**.
 *   **Neo4j Driver**: Conexión a la base de datos de grafos.
+*   **Pandas**: Procesamiento de datos tabulares y visualización.
 *   **Python-docx**: Generación de archivos Word.
 
 ## 5. Flujo de Datos (Ejemplo: "Generar PPT")

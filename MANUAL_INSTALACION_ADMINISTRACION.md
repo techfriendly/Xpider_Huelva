@@ -169,12 +169,19 @@ sudo sysctl -p
 ```
 
 ### 5.3. Activar/Desactivar Autoscroll
-Si el chatbot no hace scroll automático al recibir respuestas:
-Edita `.chainlit/config.toml` y en la sección `[features]` asegúrate de tener:
-```toml
-assistant_message_autoscroll = true
-user_message_autoscroll = true
-```
+Si el chatbot no hace scroll automático al recibir respuestas, revisa la configuración de JavaScript personalizado.
+
+1.  Asegúrate de que existe el archivo `public/force_scroll.js`.
+2.  Edita `.chainlit/config.toml` y descomenta/configura la línea:
+    ```toml
+    custom_js = "/public/force_scroll.js"
+    ```
+3.  Además, en la sección `[features]` mantén:
+    ```toml
+    assistant_message_autoscroll = true
+    user_message_autoscroll = true
+    ```
+4.  **Importante**: Forzar recarga del navegador (Ctrl+Shift+R) tras cambios.
 
 ### 5.4. Error de Permisos
 Si el servicio falla con "Permission denied", asegúrate de que el usuario `chainlit` es dueño de la carpeta:
