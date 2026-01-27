@@ -60,12 +60,12 @@ Consultas analíticas en lenguaje natural traducidas automáticamente a Cypher:
 | Python | 3.10+ | Recomendado 3.11 |
 | Neo4j | 5.x | Community o Enterprise |
 | Servidor LLM | - | Cualquier endpoint compatible OpenAI API |
-| RAM | 16 GB+ | Para modelos locales pequeños |
-| GPU (opcional) | 8 GB VRAM | Acelera inferencia LLM |
+| RAM | 16 GB+ | Para modelos locales pequeños o embeddings |
+| GPU | 24 GB+ VRAM | Acelera inferencia LLM |
 
 ### Modelos Recomendados
-- **LLM**: `Qwen/Qwen3-A30-3B`, `mistralai/Mistral-7B-Instruct-v0.3`
-- **Embeddings**: `qwen-0.6-embedding` (dim=1024), `intfloat/multilingual-e5-large`
+- **LLM**: `Qwen/Qwen3-A30-3B`, `mistralai/Mistral-7B-Instruct-v0.3` (cuantizados)
+- **Embeddings**: `qwen-0.6-embedding`, `intfloat/multilingual-e5-large` (cuantizados)
 
 ---
 
@@ -269,15 +269,6 @@ chatbot-huelva-v2/
    curl http://localhost:8000/v1/models
    ```
 
-### Consultas de fecha no funcionan (devuelve 0)
-El sistema infiere el año desde el **expediente** (ej: `24suAS...` = 2024). Si tus expedientes no siguen este patrón, las consultas por fecha no funcionarán correctamente.
-
-### El PPT entra en bucle de repetición
-Esto puede ocurrir con modelos pequeños. Soluciones:
-1. Usar un modelo más grande (7B+).
-2. Reducir `max_tokens` en `orchestrator.py`.
-3. Aumentar `frequency_penalty` a 0.5.
-
 ---
 
 ## 🤝 Contribuir
@@ -296,8 +287,3 @@ Este proyecto es propiedad de la **Diputación Provincial de Huelva**.
 Desarrollado por el equipo de **Techfriendly**.
 
 ---
-
-## 📧 Contacto
-
-- **Área de Contratación**: contratacion@diphuelva.es
-- **Soporte Técnico**: techfriendly@techfriendly.es
