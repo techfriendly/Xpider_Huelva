@@ -246,6 +246,11 @@ def tool_search_contracts(topic: str) -> Dict[str, Any]:
 
         clean_results = [clean_keys(r) for r in df_data]
         df_clean = pd.DataFrame(clean_results)
+        
+        # Eliminar 'abstract' si existe para que no ensucie la tabla
+        if 'abstract' in df_clean.columns:
+            df_clean = df_clean.drop(columns=['abstract'])
+            
         dataframe_element = cl.Dataframe(name="Contratos", data=df_clean, size="medium")
     else:
         dataframe_element = None
@@ -385,6 +390,10 @@ def tool_query_database(question: str) -> Dict[str, Any]:
             df = pd.DataFrame(rows)
             # Limpiamos columnas raras si las hay
             df = df.fillna("")
+            
+            # Eliminar 'abstract' si existe
+            if 'abstract' in df.columns:
+                df = df.drop(columns=['abstract'])
             
             dataframe_element = cl.Dataframe(
                 name="Tabla de Resultados",
